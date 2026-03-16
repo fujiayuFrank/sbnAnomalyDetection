@@ -1,0 +1,48 @@
+# Default shared configuration for the SBN anomaly detection pipeline.
+# All model-specific configs import these defaults and override as needed.
+
+project:
+  name: sbn-anomaly-detection
+  version: "0.1.0"
+
+device: auto          # auto | cpu | cuda
+
+data:
+  # Paths are overridden in model-specific configs or on the CLI.
+  features_path: null
+  tpc_features_path: null
+  pmt_features_path: null
+  signal_path: null
+  # ROOT streaming settings
+  tree_name: sbn_tree
+  tpc_branches:
+    - run
+    - subrun
+    - event
+    - tpc_waveform
+    - tpc_channel
+    - tpc_tick
+  pmt_branches:
+    - run
+    - subrun
+    - event
+    - pmt_waveform
+    - pmt_channel
+    - pmt_time_ns
+  batch_size_stream: 512   # events per streaming batch
+
+training:
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 1.0e-5
+  max_epochs: 50
+  checkpoint_dir: checkpoints/
+  output_path: null
+  log_interval: 50
+
+inference:
+  checkpoint_path: null
+  input_path: null
+  tpc_input_path: null
+  pmt_input_path: null
+  threshold: null           # set to a float to enable binary classification

@@ -1,0 +1,29 @@
+# Window autoencoder configuration for time-series waveform anomaly detection.
+# Train with:  sbn-train --config configs/window.yaml
+
+model_type: window
+
+model:
+  window_size: 256
+  n_channels: 1
+  latent_dim: 64
+  base_filters: 16
+  dropout: 0.1
+
+data:
+  signal_path: data/processed/waveform_train.npy
+  batch_size_stream: 512
+
+training:
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 1.0e-5
+  max_epochs: 50
+  checkpoint_dir: checkpoints/window/
+  output_path: checkpoints/window/window_final.pt
+  log_interval: 50
+
+inference:
+  checkpoint_path: checkpoints/window/window_final.pt
+  input_path: data/processed/waveform_test.npy
+  threshold: null

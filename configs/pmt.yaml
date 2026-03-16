@@ -1,0 +1,36 @@
+# PMT autoencoder configuration.
+# Train with:  sbn-train --config configs/pmt.yaml
+
+model_type: pmt
+
+model:
+  input_dim: 128
+  latent_dim: 16
+  hidden_dims: [64, 32]
+  dropout: 0.1
+
+data:
+  features_path: data/processed/pmt_features_train.npy
+  tree_name: sbn_tree
+  pmt_branches:
+    - run
+    - subrun
+    - event
+    - pmt_waveform
+    - pmt_channel
+    - pmt_time_ns
+  batch_size_stream: 512
+
+training:
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 1.0e-5
+  max_epochs: 50
+  checkpoint_dir: checkpoints/pmt/
+  output_path: checkpoints/pmt/pmt_final.pt
+  log_interval: 50
+
+inference:
+  checkpoint_path: checkpoints/pmt/pmt_final.pt
+  input_path: data/processed/pmt_features_test.npy
+  threshold: null

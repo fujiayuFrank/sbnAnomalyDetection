@@ -1,0 +1,35 @@
+# Fusion (TPC + PMT) autoencoder configuration.
+# Requires independently trained TPC and PMT models (for late-fusion mode),
+# or can train jointly from scratch (mode: joint).
+#
+# Train with:  sbn-train --config configs/fusion.yaml
+
+model_type: fusion
+
+model:
+  tpc_input_dim: 256
+  pmt_input_dim: 128
+  latent_dim: 32
+  hidden_dims: [192, 96]
+  dropout: 0.1
+  mode: joint    # joint | late
+
+data:
+  tpc_features_path: data/processed/tpc_features_train.npy
+  pmt_features_path: data/processed/pmt_features_train.npy
+  batch_size_stream: 512
+
+training:
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 1.0e-5
+  max_epochs: 50
+  checkpoint_dir: checkpoints/fusion/
+  output_path: checkpoints/fusion/fusion_final.pt
+  log_interval: 50
+
+inference:
+  checkpoint_path: checkpoints/fusion/fusion_final.pt
+  tpc_input_path: data/processed/tpc_features_test.npy
+  pmt_input_path: data/processed/pmt_features_test.npy
+  threshold: null
