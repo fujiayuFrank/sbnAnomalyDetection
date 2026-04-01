@@ -1,0 +1,36 @@
+# TPC autoencoder configuration.
+# Train with:  sbn-train --config configs/tpc.yaml
+
+model_type: tpc
+
+model:
+  input_dim: 256
+  latent_dim: 32
+  hidden_dims: [128, 64]
+  dropout: 0.1
+
+data:
+  features_path: data/processed/tpc_features_train.npy
+  tree_name: sbn_tree
+  tpc_branches:
+    - run
+    - subrun
+    - event
+    - tpc_waveform
+    - tpc_channel
+    - tpc_tick
+  batch_size_stream: 512
+
+training:
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 1.0e-5
+  max_epochs: 50
+  checkpoint_dir: checkpoints/tpc/
+  output_path: checkpoints/tpc/tpc_final.pt
+  log_interval: 50
+
+inference:
+  checkpoint_path: checkpoints/tpc/tpc_final.pt
+  input_path: data/processed/tpc_features_test.npy
+  threshold: null
