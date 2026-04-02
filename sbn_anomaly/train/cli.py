@@ -120,6 +120,7 @@ def _train_tpc(cfg: dict, root_files: list[str] | None = None) -> None:
             file_paths=root_files,
             tree_name=data_cfg.get("tree_name", "sbn_tree"),
             waveform_branch=data_cfg.get("waveform_branch", "tpc_waveform"),
+            hit_branches=data_cfg.get("hit_branches"),
             branches=data_cfg.get("tpc_branches"),
             input_dim=input_dim,
             batch_size=data_cfg.get("batch_size_stream", 512),

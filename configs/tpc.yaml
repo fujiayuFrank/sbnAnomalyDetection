@@ -19,6 +19,30 @@ data:
 
   # ROOT streaming settings (used when --root-files IS supplied).
   tree_name: sbn_tree
+
+  # ── Input mode ────────────────────────────────────────────────────────────
+  # Two modes are available for ROOT streaming:
+  #
+  # 1. Waveform mode (default): set waveform_branch to the raw ADC branch
+  #    name.  The nested per-event array is flattened and padded/truncated to
+  #    model.input_dim.
+  #
+  # 2. Hit mode: set waveform_branch to null and list the higher-level scalar
+  #    branches you want to use in hit_branches.  Values from each branch are
+  #    concatenated per event and padded/truncated to model.input_dim.
+  # ──────────────────────────────────────────────────────────────────────────
+
+  # Set to null to disable waveform input and use hit_branches instead.
+  waveform_branch: tpc_waveform
+
+  # Hit-level branches used when waveform_branch is null.
+  # Common choices: hit_integral, hit_charge, hit_amplitude, hit_peaktime,
+  #                 hit_rms, hit_multiplicity
+  hit_branches:
+    - hit_integral
+    - hit_charge
+    - hit_amplitude
+
   tpc_branches:
     - run
     - subrun
@@ -26,8 +50,6 @@ data:
     - tpc_waveform
     - tpc_channel
     - tpc_tick
-  # Branch whose contents are flattened into the feature vector.
-  waveform_branch: tpc_waveform
   batch_size_stream: 512
   # Per-event z-score normalisation before feeding to the model.
   normalize: false

@@ -7,7 +7,11 @@ import pytest
 import torch
 from unittest.mock import MagicMock, patch
 
-from sbn_anomaly.data.stream_dataset import TPCStreamDataset, extract_tpc_features
+from sbn_anomaly.data.stream_dataset import (
+    TPCStreamDataset,
+    extract_hit_features,
+    extract_tpc_features,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ class TestExtractTPCFeatures:
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_batch(n_events: int, n_ticks: int = 300):
+def _make_fake_waveform_batch(n_events: int, n_ticks: int = 300):
     """Build a minimal awkward-array-like batch for testing."""
     import awkward as ak
 
@@ -80,7 +84,7 @@ class TestTPCStreamDataset:
     def test_yields_correct_feature_dim(self):
         """Each yielded tuple must contain a tensor of shape (input_dim,)."""
         ds = self._dataset(input_dim=64)
-        batch = _make_fake_batch(n_events=5, n_ticks=300)
+        batch = _make_fake_waveform_batch(n_events=5, n_ticks=300)
 
         # Patch RootStreamer so it yields our synthetic batch.
         with patch(
@@ -100,7 +104,7 @@ class TestTPCStreamDataset:
     def test_max_events_limits_output(self):
         """max_events must cap the total number of yielded samples."""
         ds = self._dataset(input_dim=32, max_events=3)
-        batch = _make_fake_batch(n_events=10, n_ticks=100)
+        batch = _make_fake_waveform_batch(n_events=10, n_ticks=100)
 
         with patch(
             "sbn_anomaly.data.stream_dataset.RootStreamer"
@@ -176,6 +180,157 @@ class TestTPCStreamDataset:
 
         assert tensor.shape == (input_dim,)
         np.testing.assert_array_equal(tensor.numpy(), wave[:input_dim])
+
+
+# ---------------------------------------------------------------------------
+# extract_hit_features – unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractHitFeatures:
+    def test_single_branch_truncation(self):
+        data = {"hit_integral": np.arange(300, dtype=np.float32)}
+        result = extract_hit_features(data, ["hit_integral"], input_dim=256)
+        assert result.shape == (256,)
+        np.testing.assert_array_equal(result, data["hit_integral"][:256])
+
+    def test_single_branch_padding(self):
+        data = {"hit_integral": np.ones(10, dtype=np.float32)}
+        result = extract_hit_features(data, ["hit_integral"], input_dim=32)
+        assert result.shape == (32,)
+        np.testing.assert_array_equal(result[:10], np.ones(10, dtype=np.float32))
+        np.testing.assert_array_equal(result[10:], np.zeros(22, dtype=np.float32))
+
+    def test_multiple_branches_concatenated(self):
+        """Values should be concat'd in branch order before padding."""
+        data = {
+            "hit_integral": np.array([1.0, 2.0], dtype=np.float32),
+            "hit_charge": np.array([3.0, 4.0], dtype=np.float32),
+        }
+        result = extract_hit_features(data, ["hit_integral", "hit_charge"], input_dim=8)
+        assert result.shape == (8,)
+        np.testing.assert_array_equal(result[:4], [1.0, 2.0, 3.0, 4.0])
+        np.testing.assert_array_equal(result[4:], np.zeros(4, dtype=np.float32))
+
+    def test_missing_branch_skipped(self):
+        """Branches absent from event_data should be silently skipped."""
+        data = {"hit_integral": np.array([5.0], dtype=np.float32)}
+        result = extract_hit_features(
+            data, ["hit_integral", "nonexistent"], input_dim=4
+        )
+        assert result.shape == (4,)
+        assert result[0] == pytest.approx(5.0)
+
+    def test_empty_event_returns_zeros(self):
+        data = {"hit_integral": np.array([], dtype=np.float32)}
+        result = extract_hit_features(data, ["hit_integral"], input_dim=16)
+        assert result.shape == (16,)
+        np.testing.assert_array_equal(result, np.zeros(16, dtype=np.float32))
+
+    def test_output_dtype(self):
+        data = {"hit_integral": np.ones(5, dtype=np.float64)}
+        result = extract_hit_features(data, ["hit_integral"], input_dim=8)
+        assert result.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# TPCStreamDataset – hit mode tests
+# ---------------------------------------------------------------------------
+
+
+def _make_hit_batch(n_events: int, n_hits: int = 10):
+    """Build a fake awkward batch with hit-level scalar branches."""
+    import awkward as ak
+
+    integrals = [np.random.randn(n_hits).astype(np.float32) for _ in range(n_events)]
+    charges = [np.random.randn(n_hits).astype(np.float32) for _ in range(n_events)]
+    amplitudes = [np.random.randn(n_hits).astype(np.float32) for _ in range(n_events)]
+    return ak.Array(
+        {
+            "hit_integral": integrals,
+            "hit_charge": charges,
+            "hit_amplitude": amplitudes,
+        }
+    )
+
+
+class TestTPCStreamDatasetHitMode:
+    HIT_BRANCHES = ["hit_integral", "hit_charge", "hit_amplitude"]
+
+    def _dataset(self, **kwargs):
+        defaults = dict(
+            file_paths=["/tmp/dummy.root"],
+            tree_name="sbn_tree",
+            waveform_branch=None,
+            hit_branches=self.HIT_BRANCHES,
+            input_dim=64,
+        )
+        defaults.update(kwargs)
+        return TPCStreamDataset(**defaults)
+
+    def test_yields_correct_feature_dim(self):
+        ds = self._dataset(input_dim=64)
+        batch = _make_hit_batch(n_events=5, n_hits=10)
+
+        with patch("sbn_anomaly.data.stream_dataset.RootStreamer") as MockStreamer:
+            MockStreamer.return_value.stream.return_value = iter([batch])
+            items = list(ds)
+
+        assert len(items) == 5
+        for (tensor,) in items:
+            assert tensor.shape == (64,)
+            assert tensor.dtype == torch.float32
+
+    def test_max_events_limits_output(self):
+        ds = self._dataset(max_events=3)
+        batch = _make_hit_batch(n_events=10)
+
+        with patch("sbn_anomaly.data.stream_dataset.RootStreamer") as MockStreamer:
+            MockStreamer.return_value.stream.return_value = iter([batch])
+            items = list(ds)
+
+        assert len(items) == 3
+
+    def test_branches_requested_from_streamer(self):
+        """The streamer should be asked for exactly the hit_branches."""
+        ds = self._dataset()
+        batch = _make_hit_batch(n_events=1)
+
+        with patch("sbn_anomaly.data.stream_dataset.RootStreamer") as MockStreamer:
+            MockStreamer.return_value.stream.return_value = iter([batch])
+            _ = list(ds)
+
+        _, init_kwargs = MockStreamer.call_args
+        assert set(init_kwargs["branches"]) == set(self.HIT_BRANCHES)
+
+    def test_no_waveform_and_no_hit_branches_raises(self):
+        with pytest.raises(ValueError, match="hit_branches"):
+            TPCStreamDataset(
+                file_paths=["/tmp/dummy.root"],
+                waveform_branch=None,
+                hit_branches=None,
+            )
+
+    def test_normalize_hit_mode(self):
+        """normalize=True should produce unit std in hit mode too."""
+        ds = self._dataset(input_dim=32, normalize=True)
+        import awkward as ak
+
+        hits = np.arange(10, dtype=np.float32)
+        batch = ak.Array(
+            {
+                "hit_integral": [hits],
+                "hit_charge": [hits],
+                "hit_amplitude": [hits],
+            }
+        )
+
+        with patch("sbn_anomaly.data.stream_dataset.RootStreamer") as MockStreamer:
+            MockStreamer.return_value.stream.return_value = iter([batch])
+            (tensor,) = list(ds)[0]
+
+        arr = tensor.numpy()
+        assert abs(arr.std() - 1.0) < 1e-4, f"Expected std≈1, got {arr.std()}"
 
 
 # ---------------------------------------------------------------------------
