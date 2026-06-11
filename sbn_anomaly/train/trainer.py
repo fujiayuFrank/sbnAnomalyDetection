@@ -128,6 +128,7 @@ class BaseTrainer(ABC):
             return int(len(first))
         except Exception:
             return 0
+
     def _compute_classification_metrics(
         self,
         scores: list[float],
