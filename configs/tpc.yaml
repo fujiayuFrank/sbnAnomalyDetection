@@ -130,7 +130,6 @@ data:
     - hits2.ontraj
     - hits2.oncalo
 
-  tpc_branches:
     - meta.run
     - meta.subrun
     - meta.evt
