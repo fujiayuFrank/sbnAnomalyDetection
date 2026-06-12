@@ -3,9 +3,9 @@
 #include <vector>
 #include <iostream>
 #include <set>
+#include <utility>
 
 using namespace std;
-
 
 
 // ------------------------------------------------------------
@@ -13,12 +13,37 @@ using namespace std;
 // true  = good runs one color, bad runs another color
 // false = each run gets its own color
 // ------------------------------------------------------------
+
 bool color_by_good_bad = true;
+
+
+// ------------------------------------------------------------
+// Channel selection settings
+// Use [channel_min, channel_max), meaning:
+// channel_min included, channel_max excluded
+//
+// Example:
+// [0, 500), [500, 1000), [1000, 1500)
+// ------------------------------------------------------------
+
+bool use_channel_cut = true;
+
+vector<pair<int, int>> channel_ranges = {
+    // {0, 11276} // full range
+    {0, 2000},
+    {2000, 4000},
+    {4000, 6000},
+    {6000, 8000},
+    {8000, 10000},
+    {10000, 11276}
+};
+
 
 // ------------------------------------------------------------
 // List of run directories
 // First one is the reference run
 // ------------------------------------------------------------
+
 vector<const char*> run_dirs = {
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_19305/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_19308/reco/",
@@ -27,16 +52,15 @@ vector<const char*> run_dirs = {
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20769/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20782/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20768/reco/",
-    
+
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20614/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20615/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20620/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20621/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_20173/reco/",
     "/pnfs/icarus/persistent/users/micarrig/DQM/CI_build_lar_ci_830/reco/"
-    // Add more directories here if needed:
-
 };
+
 
 // ------------------------------------------------------------
 // Good/bad classification Sets
@@ -94,17 +118,65 @@ const char* get_run_status(int run) {
     return "unknown";
 }
 
+int add_good_files_to_chain(TChain* chain, const char* dir, const char* treePath) {
+    TString command = Form("ls %s/DQMValidationTrees_*.root 2>/dev/null", dir);
+    TString file_list = gSystem->GetFromPipe(command);
+
+    TObjArray* lines = file_list.Tokenize("\n");
+
+    int n_added = 0;
+
+    for (int i = 0; i < lines->GetEntries(); i++) {
+        TString file_path = lines->At(i)->GetName();
+
+        if (file_path.Length() == 0) continue;
+
+        TFile* f = TFile::Open(file_path);
+
+        if (!f || f->IsZombie()) {
+            cout << "Skipping bad/unreadable file: " << file_path << endl;
+            if (f) f->Close();
+            continue;
+        }
+
+        TTree* t = (TTree*)f->Get(treePath);
+
+        if (!t) {
+            cout << "Skipping file without tree " << treePath << ": "
+                 << file_path << endl;
+            f->Close();
+            continue;
+        }
+
+        f->Close();
+
+        chain->Add(file_path);
+        n_added++;
+    }
+
+    delete lines;
+
+    return n_added;
+}
 
 // ------------------------------------------------------------
 // Main plotting function
 // ------------------------------------------------------------
+//
+// Example:
+// plot_integral(0, 500)
+// plot_integral(500, 1000)
+// plot_integral(1000, 1500)
+//
+// ------------------------------------------------------------
 
-void plot_integral() {
+void plot_integral(int channel_min = 0, int channel_max = 500) {
     gROOT->SetBatch(kTRUE);
     gStyle->SetOptStat(0);
 
     const char* treePath = "caloskim/TrackCaloSkim";
-    const char* branch   = "hits2.h.integral";
+    const char* branch = "hits2.h.integral";
+    const char* channel_branch = "hits2.h.channel";
 
     int nruns = run_dirs.size();
 
@@ -127,6 +199,24 @@ void plot_integral() {
     vector<TH1D*> bands;
 
     // --------------------------------------------------------
+    // Channel cut
+    // --------------------------------------------------------
+
+    TString channel_cut = "";
+
+    if (use_channel_cut) {
+        channel_cut = Form(
+            "%s >= %d && %s < %d",
+            channel_branch,
+            channel_min,
+            channel_branch,
+            channel_max
+        );
+    }
+
+    cout << "Using channel cut: " << channel_cut << endl;
+
+    // --------------------------------------------------------
     // Build chains and histograms
     // --------------------------------------------------------
 
@@ -137,12 +227,12 @@ void plot_integral() {
 
         TChain* chain = new TChain(treePath);
 
-        TString pattern = Form("%s/DQMValidationTrees_*.root", dir);
-        int nfiles = chain->Add(pattern);
+        int nfiles = add_good_files_to_chain(chain, dir, treePath);
 
         // ROOT I/O cache
         chain->SetCacheSize(100 * 1024 * 1024);
         chain->AddBranchToCache(branch, kTRUE);
+        chain->AddBranchToCache(channel_branch, kTRUE);
 
         cout << "Run " << run << ": added " << nfiles << " ROOT files" << endl;
 
@@ -156,8 +246,12 @@ void plot_integral() {
         chains.push_back(chain);
 
         TH1D* h = new TH1D(
-            Form("h_run_%d", run),
-            "Hit Integral Comparison;Integral;Hits",
+            Form("h_run_%d_ch_%d_%d", run, channel_min, channel_max),
+            Form(
+                "Hit Integral Comparison, channels [%d,%d);Integral;Hits",
+                channel_min,
+                channel_max
+            ),
             nbins,
             xmin,
             xmax
@@ -165,9 +259,15 @@ void plot_integral() {
 
         h->Sumw2();
 
-        chain->Draw(Form("%s >> h_run_%d", branch, run), "", "goff");
+        chain->Draw(
+            Form("%s >> h_run_%d_ch_%d_%d", branch, run, channel_min, channel_max),
+            channel_cut,
+            "goff"
+        );
 
-        cout << "Raw integral run " << run << " = " << h->Integral() << endl;
+        cout << "Raw integral run " << run
+             << " for channels [" << channel_min << ", " << channel_max << ")"
+             << " = " << h->Integral() << endl;
 
         hists.push_back(h);
     }
@@ -215,10 +315,10 @@ void plot_integral() {
         TH1D* h_other = hists[j];
 
         for (int i = 1; i <= nbins; i++) {
-            double a  = h_ref->GetBinContent(i);
+            double a = h_ref->GetBinContent(i);
             double ea = h_ref->GetBinError(i);
 
-            double b  = h_other->GetBinContent(i);
+            double b = h_other->GetBinContent(i);
             double eb = h_other->GetBinError(i);
 
             double err2 = ea * ea + eb * eb;
@@ -292,7 +392,10 @@ void plot_integral() {
         hists[i]->SetMarkerStyle(marker);
         hists[i]->SetMarkerSize(0.6);
 
-        TH1D* band = (TH1D*)hists[i]->Clone(Form("band_run_%d", run_numbers[i]));
+        TH1D* band = (TH1D*)hists[i]->Clone(
+            Form("band_run_%d_ch_%d_%d", run_numbers[i], channel_min, channel_max)
+        );
+
         band->SetFillColorAlpha(color, 0.18);
         band->SetFillStyle(1001);
         band->SetLineColor(color);
@@ -339,7 +442,14 @@ void plot_integral() {
         }
     }
 
-    bands[0]->SetTitle("Integral of gaussian fit to ADC values Collection;Integral Value;Hits");
+    bands[0]->SetTitle(
+        Form(
+            "Integral of gaussian fit to ADC values Collection, channels [%d,%d);Integral Value;Hits",
+            channel_min,
+            channel_max
+        )
+    );
+
     bands[0]->SetMaximum(1.15 * ymax);
     bands[0]->SetMinimum(0);
 
@@ -373,13 +483,21 @@ void plot_integral() {
         if (i == 0) {
             leg->AddEntry(
                 hists[i],
-                Form("Data ID %d reference (%s)", run_numbers[i], get_run_status(run_numbers[i])),
+                Form(
+                    "Data ID %d reference (%s)",
+                    run_numbers[i],
+                    get_run_status(run_numbers[i])
+                ),
                 "lep"
             );
         } else {
             leg->AddEntry(
                 hists[i],
-                Form("Data ID %d normalized (%s)", run_numbers[i], get_run_status(run_numbers[i])),
+                Form(
+                    "Data ID %d normalized (%s)",
+                    run_numbers[i],
+                    get_run_status(run_numbers[i])
+                ),
                 "lep"
             );
         }
@@ -398,9 +516,11 @@ void plot_integral() {
         chi2_text.DrawLatex(
             0.58,
             y_text,
-            Form("run %d: #chi^{2}/ndf = %.6f",
-                 run_numbers[i],
-                 reduced_chi2_values[i])
+            Form(
+                "run %d: #chi^{2}/ndf = %.6f",
+                run_numbers[i],
+                reduced_chi2_values[i]
+            )
         );
 
         y_text -= 0.04;
@@ -417,7 +537,7 @@ void plot_integral() {
 
     for (int j = 1; j < nruns; j++) {
         TH1D* ratio = (TH1D*)h_ref->Clone(
-            Form("ratio_run_%d", run_numbers[j])
+            Form("ratio_run_%d_ch_%d_%d", run_numbers[j], channel_min, channel_max)
         );
 
         ratio->Reset();
@@ -426,10 +546,10 @@ void plot_integral() {
         TH1D* h_other = hists[j];
 
         for (int i = 1; i <= nbins; i++) {
-            double a  = h_ref->GetBinContent(i);
+            double a = h_ref->GetBinContent(i);
             double ea = h_ref->GetBinError(i);
 
-            double b  = h_other->GetBinContent(i);
+            double b = h_other->GetBinContent(i);
             double eb = h_other->GetBinError(i);
 
             if (a > 0) {
@@ -471,9 +591,11 @@ void plot_integral() {
 
     // First ratio creates axes
     ratios[0]->GetYaxis()->SetTitle(
-        Form("#frac{(run %d) - (other run)}{(run %d)}",
-             run_ref,
-             run_ref)
+        Form(
+            "#frac{(run %d) - (other run)}{(run %d)}",
+            run_ref,
+            run_ref
+        )
     );
 
     ratios[0]->GetXaxis()->SetTitle("Integral");
@@ -507,7 +629,11 @@ void plot_integral() {
     for (int j = 1; j < nruns; j++) {
         ratio_leg->AddEntry(
             ratios[j - 1],
-            Form("run %d (%s)", run_numbers[j], get_run_status(run_numbers[j])),
+            Form(
+                "run %d (%s)",
+                run_numbers[j],
+                get_run_status(run_numbers[j])
+            ),
             "lep"
         );
     }
@@ -527,12 +653,69 @@ void plot_integral() {
 
     TString mode_tag = color_by_good_bad ? "good_bad_colors" : "multi_colors";
 
-    c->SaveAs(Form("integral_comparison_many_runs_%s_%s.png", mode_tag.Data(), run_tag.Data()));
-    c->SaveAs(Form("integral_comparison_many_runs_%s_%s.pdf", mode_tag.Data(), run_tag.Data()));
+    c->SaveAs(
+        Form(
+            "integral_comparison_many_runs_%s_ch_%d_%d_%s.png",
+            mode_tag.Data(),
+            channel_min,
+            channel_max,
+            run_tag.Data()
+        )
+    );
+
+    c->SaveAs(
+        Form(
+            "integral_comparison_many_runs_%s_ch_%d_%d_%s.pdf",
+            mode_tag.Data(),
+            channel_min,
+            channel_max,
+            run_tag.Data()
+        )
+    );
 
     cout << "Saved "
-         << Form("integral_comparison_many_runs_%s_%s.png", mode_tag.Data(), run_tag.Data())
+         << Form(
+                "integral_comparison_many_runs_%s_ch_%d_%d_%s.png",
+                mode_tag.Data(),
+                channel_min,
+                channel_max,
+                run_tag.Data()
+            )
          << " and "
-         << Form("integral_comparison_many_runs_%s_%s.pdf", mode_tag.Data(), run_tag.Data())
+         << Form(
+                "integral_comparison_many_runs_%s_ch_%d_%d_%s.pdf",
+                mode_tag.Data(),
+                channel_min,
+                channel_max,
+                run_tag.Data()
+            )
          << endl;
+}
+
+
+// ------------------------------------------------------------
+// Plot all predefined channel ranges
+// ------------------------------------------------------------
+
+void plot_all_channel_ranges() {
+    for (auto range : channel_ranges) {
+        int ch_min = range.first;
+        int ch_max = range.second;
+
+        cout << endl;
+        cout << "========================================" << endl;
+        cout << "Plotting channel range ["
+             << ch_min
+             << ", "
+             << ch_max
+             << ")"
+             << endl;
+        cout << "========================================" << endl;
+
+        plot_integral(ch_min, ch_max);
+    }
+}
+
+void plot_wrapper() {
+    plot_all_channel_ranges();
 }
