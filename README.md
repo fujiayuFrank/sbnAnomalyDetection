@@ -72,7 +72,10 @@ sbnAnomalyDetection/
 │   ├── pmt.yaml
 │   └── ...
 ├── tests/
-└── pyproject.toml
+├── pyproject.toml
+└── graphing/
+    ├── plot_integral.C               # hits2.h.integral Histogram plotter
+    └── plot_integral.py
 ```
 
 ## Installation
