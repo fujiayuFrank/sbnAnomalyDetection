@@ -4,6 +4,8 @@
 #include <iostream>
 #include <set>
 #include <utility>
+#include <iomanip>
+#include <fstream>
 
 using namespace std;
 
@@ -30,11 +32,25 @@ bool use_channel_cut = true;
 
 vector<pair<int, int>> channel_ranges = {
     // {0, 11276} // full range
-    {0, 2000},
-    {2000, 4000},
-    {4000, 6000},
-    {6000, 8000},
-    {8000, 10000},
+    {0, 500},
+    {500, 1000},
+    {1000, 1500},
+    {1500, 2000},
+    {2000, 2500},
+    {2500, 3000},
+    {3000, 3500},
+    {3500, 4000},
+    {4000, 4500},
+    {4500, 5000},
+    {5000, 5500},
+    {5500, 6000},
+    {6000, 6500},
+    {6500, 7000},
+    {7000, 7500},
+    {8000, 8500},
+    {8500, 9000},
+    {9000, 9500},
+    {9500, 10000},
     {10000, 11276}
 };
 
@@ -157,6 +173,72 @@ int add_good_files_to_chain(TChain* chain, const char* dir, const char* treePath
     delete lines;
 
     return n_added;
+}
+
+void print_chi2_table_for_channel_range(
+    int channel_min,
+    int channel_max,
+    const vector<int>& run_numbers,
+    const vector<double>& chi2_values,
+    const vector<int>& ndf_values,
+    const vector<double>& reduced_chi2_values
+) {
+    TString txt_name = Form(
+        "chi2_table_ch_%d_%d.txt",
+        channel_min,
+        channel_max
+    );
+
+    ofstream fout(txt_name.Data());
+
+    if (!fout.is_open()) {
+        cout << "Could not open output text file: "
+             << txt_name
+             << endl;
+        return;
+    }
+
+    auto write_table = [&](ostream& out) {
+        out << endl;
+        out << "============================================================" << endl;
+        out << "Chi-square table for channels ["
+            << channel_min << ", " << channel_max << ")" << endl;
+        out << "============================================================" << endl;
+
+        out << left
+            << setw(12) << "Run"
+            << setw(12) << "Status"
+            << setw(18) << "Chi2"
+            << setw(10) << "NDF"
+            << setw(18) << "Chi2/NDF"
+            << endl;
+
+        out << string(70, '-') << endl;
+
+        for (int i = 0; i < run_numbers.size(); i++) {
+            out << left
+                << setw(12) << run_numbers[i]
+                << setw(12) << get_run_status(run_numbers[i])
+                << setw(18) << fixed << setprecision(6) << chi2_values[i]
+                << setw(10) << ndf_values[i]
+                << setw(18) << fixed << setprecision(6) << reduced_chi2_values[i]
+                << endl;
+        }
+
+        out << "============================================================" << endl;
+    };
+
+    // Print to terminal
+    write_table(cout);
+
+    // Save to txt file
+    write_table(fout);
+
+    fout.close();
+
+    cout << "Saved chi-square table to "
+         << txt_name
+         << endl;
 }
 
 // ------------------------------------------------------------
@@ -690,6 +772,15 @@ void plot_integral(int channel_min = 0, int channel_max = 500) {
                 run_tag.Data()
             )
          << endl;
+
+    print_chi2_table_for_channel_range(
+        channel_min,
+        channel_max,
+        run_numbers,
+        chi2_values,
+        ndf_values,
+        reduced_chi2_values
+    );
 }
 
 
