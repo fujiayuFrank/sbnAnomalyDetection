@@ -97,23 +97,22 @@ set<int> bad_runs = {
 // ------------------------------------------------------------
 
 vector<int> good_colors = {
-    kBlue + 1,
-    kAzure + 1,
-    kCyan + 2,
-    kTeal + 3,
-    kSpring + 4,
-    kGreen + 2,
-    kBlue - 7
+    TColor::GetColor("#2483c8"), // blue
+    TColor::GetColor("#063d6b"), // medium blue
+    TColor::GetColor("#17becf"), // cyan
+    TColor::GetColor("#00a087"), // teal
+    TColor::GetColor("#2ca02c"), // green
+    TColor::GetColor("#4daf4a"), // medium green
+    TColor::GetColor("#66c2a5")  // pale teal
 };
 
 vector<int> bad_colors = {
-    kRed + 1,
-    kOrange + 7,
-    kMagenta + 1,
-    kPink + 7,
-    kOrange - 3,
-    kViolet + 1,
-    kRed - 7
+    TColor::GetColor("#d62728"), // red
+    TColor::GetColor("#e41a1c"), // bright red
+    TColor::GetColor("#b2182b"), // dark red
+    TColor::GetColor("#ff7f0e"), // orange
+    TColor::GetColor("#a65628"), // brown-orange
+    TColor::GetColor("#613807")  // dark brown-orange
 };
 
 int unknown_color = kBlack;
