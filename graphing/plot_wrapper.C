@@ -90,10 +90,33 @@ set<int> bad_runs = {
     20614, 20615, 20620, 20621, 20173, 830
 };
 
-int good_color = kBlue;
-int bad_color = kRed;
-int unknown_color = kBlack;
+// ------------------------------------------------------------
+// Color palettes
+// Good runs use cold colors.
+// Bad runs use hot colors.
+// ------------------------------------------------------------
 
+vector<int> good_colors = {
+    kBlue + 1,
+    kAzure + 1,
+    kCyan + 2,
+    kTeal + 3,
+    kSpring + 4,
+    kGreen + 2,
+    kBlue - 7
+};
+
+vector<int> bad_colors = {
+    kRed + 1,
+    kOrange + 7,
+    kMagenta + 1,
+    kPink + 7,
+    kOrange - 3,
+    kViolet + 1,
+    kRed - 7
+};
+
+int unknown_color = kBlack;
 
 // ------------------------------------------------------------
 // Extract run number from path
@@ -118,11 +141,40 @@ int extract_run_number(const char* path) {
 // ------------------------------------------------------------
 
 int get_run_color(int run) {
-    if (good_runs.count(run)) return good_color;
-    if (bad_runs.count(run)) return bad_color;
+    if (good_runs.count(run)) {
+        int index = 0;
+
+        for (const char* dir : run_dirs) {
+            int r = extract_run_number(dir);
+
+            if (!good_runs.count(r)) continue;
+
+            if (r == run) {
+                return good_colors[index % good_colors.size()];
+            }
+
+            index++;
+        }
+    }
+
+    if (bad_runs.count(run)) {
+        int index = 0;
+
+        for (const char* dir : run_dirs) {
+            int r = extract_run_number(dir);
+
+            if (!bad_runs.count(r)) continue;
+
+            if (r == run) {
+                return bad_colors[index % bad_colors.size()];
+            }
+
+            index++;
+        }
+    }
+
     return unknown_color;
 }
-
 
 // ------------------------------------------------------------
 // Decide label from good/bad label
