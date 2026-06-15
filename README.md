@@ -74,8 +74,8 @@ sbnAnomalyDetection/
 ├── tests/
 ├── pyproject.toml
 └── graphing/
-    ├── plot_integral.C               # hits2.h.integral Histogram plotter
-    └── plot_integral.py
+    ├── plot_wrapper.C               # hits2.h.integral Histogram plotter
+    └── plot_wrapper.py
 ```
 
 ## Installation
