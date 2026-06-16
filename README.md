@@ -75,7 +75,8 @@ sbnAnomalyDetection/
 ├── pyproject.toml
 ├── graphing/
 │    ├── plot_wrapper.C               # hits2.h.integral Histogram plotter
-│    └── plot_wrapper.py
+│    ├── plot_wrapper.py
+│    └──materialize_window_plot.py    # materialize_window .npz file plotter
 └── pyproject.toml
 ```
 
