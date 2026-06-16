@@ -188,6 +188,8 @@ class SparseWindowDatasetPyG(Dataset):
         tree_name: str,
         hit_branches: List[str],
         n_channels: Optional[int] = None,
+        channel_start: int = 0,
+        channel_end: Optional[int] = None,
         sort_events: bool = True,
         tpc_branches: Optional[List[str]] = None,
         max_events: Optional[int] = None,
@@ -203,6 +205,25 @@ class SparseWindowDatasetPyG(Dataset):
         import uproot
         import awkward as ak
         from sbn_anomaly.data.materialize_windows import _group_hit_prefixes, _extract_tpc_branch_value
+
+        if channel_start < 0:
+            raise ValueError(f"channel_start must be >= 0, got {channel_start}")
+
+        if channel_end is not None and channel_end <= channel_start:
+            raise ValueError(
+                f"channel_end must be greater than channel_start, got "
+                f"channel_start={channel_start}, channel_end={channel_end}"
+            )
+
+        if n_channels is not None and channel_end is not None:
+            expected_n_channels = channel_end - channel_start
+            if int(n_channels) != expected_n_channels:
+                print(
+                    f"Warning: both n_channels={n_channels} and channel range "
+                    f"[{channel_start}, {channel_end}) were given. "
+                    f"Using n_channels={expected_n_channels} from channel range."
+                )
+            n_channels = expected_n_channels
 
         prefixes = _group_hit_prefixes(hit_branches)
         integral_branches = [p + ".integral" for p in prefixes]
@@ -231,6 +252,15 @@ class SparseWindowDatasetPyG(Dataset):
                         logger.warning("Tree '%s' not found in %s – skipping.", tree_name, path)
                         continue
                     tree = root_file[tree_name]
+
+                    logger.info(
+                        "  [%d/%d] %s — %d entries",
+                        file_idx + 1,
+                        len(file_list),
+                        path,
+                        tree.num_entries,
+                    )
+
                     logger.info("  [%d/%d] %s — %d entries", file_idx + 1, len(file_list), path, tree.num_entries)
                     for chunk in tree.iterate(all_branches, step_size=512, library="ak"):
                         for i in range(len(chunk)):
@@ -255,13 +285,39 @@ class SparseWindowDatasetPyG(Dataset):
                                 m = min(len(integrals), len(channels), len(times), len(wires), len(planes), len(tpcs))
                                 if m == 0:
                                     continue
-                                valid = channels[:m] >= 0
-                                ch_parts.append(channels[:m][valid])
-                                val_parts.append(integrals[:m][valid])
-                                time_parts.append(times[:m][valid])
-                                wire_parts.append(wires[:m][valid])
-                                plane_parts.append(planes[:m][valid])
-                                tpc_parts.append(tpcs[:m][valid])
+
+                                integrals = integrals[:m]
+                                channels = channels[:m]
+                                times = times[:m]
+                                wires = wires[:m]
+                                planes = planes[:m]
+                                tpcs = tpcs[:m]
+
+                                # Keep only requested physical channel range.
+                                valid = channels >= channel_start
+                                if channel_end is not None:
+                                    valid &= channels < channel_end
+
+                                channels = channels[valid]
+                                integrals = integrals[valid]
+                                times = times[valid]
+                                wires = wires[valid]
+                                planes = planes[valid]
+                                tpcs = tpcs[valid]
+
+                                if channels.size == 0:
+                                    continue
+
+                                # Remap physical channel numbers to local indices.
+                                # Example: 9500, 9501, ..., 9999 -> 0, 1, ..., 499
+                                channels = channels - channel_start
+
+                                ch_parts.append(channels)
+                                val_parts.append(integrals)
+                                time_parts.append(times)
+                                wire_parts.append(wires)
+                                plane_parts.append(planes)
+                                tpc_parts.append(tpcs)
 
                             ch_arr = np.concatenate(ch_parts) if ch_parts else np.empty(0, dtype=np.int64)
                             val_arr = np.concatenate(val_parts) if val_parts else np.empty(0, dtype=np.float32)
@@ -316,7 +372,13 @@ class SparseWindowDatasetPyG(Dataset):
         sizes = np.array([len(e["channels"]) for e in raw_events], dtype=np.int64)
         offsets = np.concatenate([[0], np.cumsum(sizes)])
 
-        n_ch = n_channels if n_channels is not None else (discovered_max + 1 if discovered_max >= 0 else 0)
+        if channel_end is not None:
+            n_ch = int(channel_end - channel_start)
+        else:
+            n_ch = int(n_channels) if n_channels is not None else (
+                int(discovered_max + 1) if discovered_max >= 0 else 0
+            )
+
         logger.info(
             "Events packed: %d total hits, n_channels=%d  (~%.1f MB)",
             len(ch_flat), n_ch,
@@ -479,6 +541,10 @@ class SparseWindowDatasetPyG(Dataset):
         agg_offsets = np.zeros(n_events + 1, dtype=np.int64)
 
         for i in range(n_events):
+
+            if i % 1000 == 0:
+                print(f"DEBUG pre-aggregating event {i}/{n_events}", flush=True)
+
             h_start = int(self._offsets[i])
             h_end = int(self._offsets[i + 1])
             ch = self._channels_flat[h_start:h_end]

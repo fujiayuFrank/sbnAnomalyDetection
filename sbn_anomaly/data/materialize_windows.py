@@ -85,6 +85,8 @@ def materialize_windows_from_root(
     n_bins: int = 4,
     stride: int = 1,
     n_channels: Optional[int] = None,
+    channel_start: int = 0,
+    channel_end: Optional[int] = None,
     tpc_branches: Optional[List[str]] = None,
     node_features: Optional[List[str]] = None,
     max_events: Optional[int] = None,
@@ -117,6 +119,25 @@ def materialize_windows_from_root(
     if invalid:
         raise ValueError(f"Invalid node_features: {invalid}. Allowed: {allowed_features}")
     n_node_features = len(node_features)
+
+    if channel_start < 0:
+        raise ValueError(f"channel_start must be >= 0, got {channel_start}")
+
+    if channel_end is not None and channel_end <= channel_start:
+        raise ValueError(
+            f"channel_end must be greater than channel_start, got "
+            f"channel_start={channel_start}, channel_end={channel_end}"
+        )
+
+    if n_channels is not None and channel_end is not None:
+        expected_n_channels = channel_end - channel_start
+        if int(n_channels) != expected_n_channels:
+            logger.warning(
+                "Both --n-channels and --channel-start/--channel-end were given. "
+                "Using n_channels=%d from channel range [%d, %d), ignoring --n-channels=%d",
+                expected_n_channels, channel_start, channel_end, int(n_channels)
+            )
+        n_channels = expected_n_channels
 
     prefixes = _group_hit_prefixes(hit_branches)
     # Identify required branch names for each prefix
@@ -178,9 +199,19 @@ def materialize_windows_from_root(
                     continue
                 integrals = integrals[:m]
                 channels = channels[:m]
-                valid = channels >= 0
-                ch_parts.append(channels[valid])
-                val_parts.append(integrals[valid])
+                valid = channels >= channel_start
+                if channel_end is not None:
+                    valid &= channels < channel_end
+
+                channels = channels[valid]
+                integrals = integrals[valid]
+
+                # Remap physical channel numbers to local indices.
+                # Example: physical channels 500–999 become local channels 0–499.
+                channels = channels - channel_start
+
+                ch_parts.append(channels)
+                val_parts.append(integrals)
 
             if ch_parts:
                 channels_all = np.concatenate(ch_parts)
@@ -206,6 +237,23 @@ def materialize_windows_from_root(
 
     logger.info("Collected %d total events. Sorting by (run, subrun, event)...", len(all_events))
 
+    # If there are fewer events than the requested window size,
+    # shrink the window size so we can still create one complete window.
+    n_events_collected = len(all_events)
+
+    if n_events_collected == 0:
+        raise ValueError("No events were collected from the input ROOT files.")
+
+    if n_events_collected < window_size:
+        logger.warning(
+            "Only collected %d events, but window_size=%d. "
+            "Changing window_size to %d so one complete window can be created.",
+            n_events_collected,
+            window_size,
+            n_events_collected,
+        )
+        window_size = n_events_collected
+
     # Sort events by run, subrun, event
     def _event_sort_key(evt):
         meta = evt['metadata']
@@ -228,7 +276,10 @@ def materialize_windows_from_root(
 
     # Pre-compute output shape so we can allocate once — either on disk (memmap)
     # or in RAM — instead of accumulating a Python list and np.stack-ing at the end.
-    N_channels_final = int(discovered_max_channel + 1) if n_channels is None else int(n_channels)
+    if channel_end is not None:
+        N_channels_final = int(channel_end - channel_start)
+    else:
+        N_channels_final = int(discovered_max_channel + 1) if n_channels is None else int(n_channels)
     if N_channels_final <= 0:
         N_channels_final = 0
     n_events_collected = len(all_events)
@@ -277,10 +328,7 @@ def materialize_windows_from_root(
             input_filenames_list.append(evt['filename'])
 
         if len(event_buffer) >= window_size:
-            if n_channels is not None:
-                N_channels = int(n_channels)
-            else:
-                N_channels = int(discovered_max_channel + 1) if discovered_max_channel >= 0 else 0
+            N_channels = N_channels_final
 
             window_arr = np.zeros((N_channels, n_bins, n_node_features), dtype=np.float32)
 
@@ -375,6 +423,13 @@ def materialize_windows_from_root(
     # Build channel_map: physical_channel -> index
     channel_map = {i: i for i in range(N_channels_final)}
 
+    # Build physical_channels array for metadata: the actual channel numbers corresponding to each index.
+    physical_channels = np.arange(
+        channel_start,
+        channel_start + N_channels_final,
+        dtype=np.int64,
+    )
+
     # Build metadata dictionary
     # Windows shape is now (N_windows, N_channels, n_temporal_bins, n_node_features)
     meta = {
@@ -382,7 +437,10 @@ def materialize_windows_from_root(
         "window_size": int(window_size),
         "stride": int(stride),
         "n_channels": int(N_channels_final),
-        "channel_map": np.array([channel_map.get(i, i) for i in range(N_channels_final)], dtype=np.int64),
+        "channel_start": int(channel_start),
+        "channel_end": int(channel_start + N_channels_final),
+        "physical_channels": physical_channels,
+        "channel_map": physical_channels,
         "hit_branches": np.array(hit_branches, dtype=str),
         "input_filenames": np.array(window_filenames, dtype=str) if window_filenames else np.array([], dtype=str),
         "node_features": np.array(node_features, dtype=str),
@@ -457,6 +515,8 @@ def _main_cli(argv=None):
     parser.add_argument("--n-bins", type=int, default=None)
     parser.add_argument("--stride", type=int, default=None)
     parser.add_argument("--n-channels", type=int, default=None)
+    parser.add_argument("--channel-start", type=int, default=None)
+    parser.add_argument("--channel-end", type=int, default=None)
     parser.add_argument("--hit-branches", nargs="+", default=None, help="List of hit branch names; overrides config")
     parser.add_argument("--node-features", nargs="+", default=None, help="Node features to compute: sum, min, max, stdev, mean, count (default: all)")
     parser.add_argument("--max-events", type=int, default=None, help="Stop after collecting this many events (useful for testing)")
@@ -471,7 +531,7 @@ def _main_cli(argv=None):
     )
     args = parser.parse_args(argv)
 
-    # Load defaults from YAML config if provided
+    
     tree_name = "sbn_tree"
     window_size = 20
     n_bins = 4
@@ -481,22 +541,8 @@ def _main_cli(argv=None):
     n_channels = None
     node_features = None
     max_events = None
-
-    if args.config:
-        import yaml
-        with open(args.config) as f:
-            cfg = yaml.safe_load(f)
-        data_cfg = cfg.get("data", {})
-        tree_name = data_cfg.get("tree_name", tree_name)
-        window_size = data_cfg.get("window_size", window_size)
-        n_bins = data_cfg.get("n_temporal_bins", n_bins)
-        stride = data_cfg.get("stride", stride)
-        hit_branches = data_cfg.get("hit_branches")
-        tpc_branches = data_cfg.get("tpc_branches")
-        n_channels = data_cfg.get("n_channels")
-        node_features = data_cfg.get("node_features")
-        max_events = data_cfg.get("max_events")
-        logger.info("Loaded config from %s", args.config)
+    channel_start = 0
+    channel_end = None
 
     # CLI arguments override config
     if args.tree_name is not None:
@@ -515,7 +561,31 @@ def _main_cli(argv=None):
         node_features = args.node_features
     if args.max_events is not None:
         max_events = args.max_events
+    if args.channel_start is not None:
+        channel_start = args.channel_start
+    if args.channel_end is not None:
+        channel_end = args.channel_end
 
+     # Load defaults from YAML config if provided
+    if args.config:
+        import yaml
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+        data_cfg = cfg.get("data", {})
+        tree_name = data_cfg.get("tree_name", tree_name)
+        window_size = data_cfg.get("window_size", window_size)
+        n_bins = data_cfg.get("n_temporal_bins", n_bins)
+        stride = data_cfg.get("stride", stride)
+        hit_branches = data_cfg.get("hit_branches")
+        tpc_branches = data_cfg.get("tpc_branches")
+        n_channels = data_cfg.get("n_channels")
+        node_features = data_cfg.get("node_features")
+        max_events = data_cfg.get("max_events")
+        channel_start = data_cfg.get("channel_start", channel_start)
+        channel_end = data_cfg.get("channel_end", channel_end)
+        logger.info("Loaded config from %s", args.config)
+
+    # Check if hit_branches were provided via CLI or config
     if not hit_branches:
         parser.error("--hit-branches required or must be in config under data.hit_branches")
 
@@ -545,6 +615,8 @@ def _main_cli(argv=None):
             tree_name=tree_name,
             hit_branches=list(hit_branches),
             n_channels=n_channels,
+            channel_start=channel_start,
+            channel_end=channel_end,
             sort_events=True,
             tpc_branches=tpc_branches,
             max_events=max_events,
@@ -577,6 +649,8 @@ def _main_cli(argv=None):
         n_bins=n_bins,
         stride=stride,
         n_channels=n_channels,
+        channel_start=channel_start,
+        channel_end=channel_end,
         tpc_branches=tpc_branches,
         node_features=node_features,
         max_events=max_events,
