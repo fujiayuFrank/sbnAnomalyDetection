@@ -1,0 +1,27 @@
+data:
+  tree_name: "caloskim/TrackCaloSkim"
+
+  hit_branches:
+    - hits2.h.integral
+    - hits2.h.channel
+
+  tpc_branches:
+    - meta.run
+    - meta.subrun
+    - meta.evt
+
+  window_size: 20
+  n_temporal_bins: 4
+  stride: 20
+
+  channel_start: 9500
+  channel_end: 10000
+
+  node_features:
+    - sum
+    - min
+    - max
+    - stdev
+    - count
+
+  # max_events: 1000
