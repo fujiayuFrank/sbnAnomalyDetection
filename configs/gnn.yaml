@@ -7,7 +7,7 @@ model_type: gnn
 
 data:
   # Path to sparse events .npz saved by SparseWindowDatasetPyG.save_events()
-  events_path: /nashome/m/micarrig/icarus/ml/sbnAnomalyDetection/data/windows_train.npz
+  events_path: /exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/data/windows_train.npz
 
   # ROOT tree to read from (used by materializer)
   tree_name: caloskim/TrackCaloSkim
@@ -65,15 +65,15 @@ model:
   norm_type: batch
 
 training:
-  batch_size: 16
-  num_workers: 4
+  batch_size: 30
+  num_workers: 5
   lr: 0.001
   weight_decay: 1.0e-4
-  max_epochs: 20
-  checkpoint_dir: checkpoints/gnn/may-28-v1
-  output_path: checkpoints/gnn/may-28-v1/gnn_final.pt
+  max_epochs: 200
+  checkpoint_dir: checkpoints/gnn/June-18-test
+  output_path: checkpoints/gnn/June-18-test/gnn_final.pt
   log_interval: 50
-  validation_split: 0.1
+  validation_split: 0.2
   use_amp: true
 
   # How to reduce the two per-window anomaly scores returned by the GNN trainer.
@@ -82,7 +82,7 @@ training:
   score_mode: mean
 
 inference:
-  checkpoint_path: checkpoints/gnn/may-27-v1/gnn_final.pt
-  input_path: /nashome/m/micarrig/icarus/ml/sbnAnomalyDetection/data/windows_test.npz
+  checkpoint_path: checkpoints/gnn/June-18-test/gnn_final.pt
+  input_path: /exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/data/windows_test.npz
   threshold: null
   max_windows: null  # set to an integer to score only the first N windows
