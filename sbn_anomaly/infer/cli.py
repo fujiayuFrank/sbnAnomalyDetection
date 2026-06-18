@@ -402,6 +402,7 @@ def _infer_gnn(cfg: dict, checkpoint: str, output: str) -> None:
         gru_layers=int(model_cfg.get("gru_layers", 1)),
         history=history,
         dropout=float(model_cfg.get("dropout", 0.1)),
+        norm_type=model_cfg.get("norm_type", "batch"),
     )
 
     threshold = infer_cfg.get("threshold")
