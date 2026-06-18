@@ -76,7 +76,9 @@ sbnAnomalyDetection/
 ├── graphing/
 │    ├── plot_wrapper.C               # hits2.h.integral Histogram plotter
 │    ├── plot_wrapper.py
-│    └──materialize_window_plot.py    # materialize_window .npz file plotter
+│    ├── materialize_window_plot.py   # materialize_window .npz file plotter
+│    ├── plot_channelhist.C           # hits2.h.channel Histogram plotter
+│    └── plot_channelhist.py
 └── pyproject.toml
 ```
 
