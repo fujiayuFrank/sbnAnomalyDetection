@@ -65,16 +65,20 @@ model:
   norm_type: batch
 
 training:
-  batch_size: 30
+  batch_size: 20
   num_workers: 5
-  lr: 0.001
+  lr: 0.005
   weight_decay: 1.0e-4
-  max_epochs: 200
-  checkpoint_dir: checkpoints/gnn/June-18-test
-  output_path: checkpoints/gnn/June-18-test/gnn_final.pt
+  max_epochs: 100
+  checkpoint_dir: checkpoints/gnn/June-22-test
+  output_path: checkpoints/gnn/June-22-test/gnn_final.pt
   log_interval: 50
-  validation_split: 0.2
+  validation_split: 0.15
   use_amp: true
+
+  # Save weights/epoch_XXXX.pt after epochs.
+  # false saves disk space; final weights are still saved to output_path.
+  save_epoch_checkpoints: false
 
   # How to reduce the two per-window anomaly scores returned by the GNN trainer.
   # The trainer computes per-node MSE, then returns [mean, max] across nodes in the window.
@@ -82,7 +86,7 @@ training:
   score_mode: mean
 
 inference:
-  checkpoint_path: checkpoints/gnn/June-18-test/gnn_final.pt
+  checkpoint_path: checkpoints/gnn/June-22-test/gnn_final.pt
   input_path: /exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/data/windows_test.npz
   threshold: null
   max_windows: null  # set to an integer to score only the first N windows

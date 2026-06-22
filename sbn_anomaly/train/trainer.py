@@ -57,6 +57,7 @@ class BaseTrainer(ABC):
         anomaly_threshold: Optional[float] = None,
         reconstruction_plot_max_values: int = 50000,
         save_best_only: bool = False,
+        save_epoch_checkpoints: bool = True,
         use_amp: bool = False,
         score_mode: str = "mean",
     ) -> None:
@@ -74,6 +75,7 @@ class BaseTrainer(ABC):
         self.anomaly_threshold = anomaly_threshold
         self.reconstruction_plot_max_values = max(int(reconstruction_plot_max_values), 0)
         self.save_best_only = bool(save_best_only)
+        self.save_epoch_checkpoints = bool(save_epoch_checkpoints)
         self.best_loss: Optional[float] = None
         self.use_amp = bool(use_amp) and self.device.type == "cuda"
         self.score_mode = str(score_mode).lower()
@@ -531,7 +533,7 @@ class BaseTrainer(ABC):
             if is_best:
                 self.best_loss = mean_loss
 
-            if self.checkpoint_dir:
+            if self.checkpoint_dir and self.save_epoch_checkpoints:
                 if should_save_epoch_artifacts:
                     weights_dir = self.checkpoint_dir / "weights"
                     weights_dir.mkdir(parents=True, exist_ok=True)

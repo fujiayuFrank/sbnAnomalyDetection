@@ -28,6 +28,7 @@ class GNNTrainer(BaseTrainer):
         log_interval: int = 50,
         anomaly_threshold: Optional[float] = None,
         save_best_only: bool = False,
+        save_epoch_checkpoints: bool = True,
     ) -> None:
         if model is None:
             raise ValueError("GNNTrainer requires a model instance")
@@ -41,6 +42,7 @@ class GNNTrainer(BaseTrainer):
             log_interval=log_interval,
             anomaly_threshold=anomaly_threshold,
             save_best_only=save_best_only,
+            save_epoch_checkpoints=save_epoch_checkpoints,
         )
         self.criterion = nn.MSELoss()
 
@@ -83,6 +85,7 @@ class GNNTrainerPyG(BaseTrainer):
         log_interval: int = 50,
         anomaly_threshold: Optional[float] = None,
         save_best_only: bool = False,
+        save_epoch_checkpoints: bool = True,
         use_amp: bool = False,
         score_mode: str = "mean",
     ) -> None:
@@ -98,6 +101,7 @@ class GNNTrainerPyG(BaseTrainer):
             log_interval=log_interval,
             anomaly_threshold=anomaly_threshold,
             save_best_only=save_best_only,
+            save_epoch_checkpoints=save_epoch_checkpoints,
             use_amp=use_amp,
             score_mode=score_mode,
         )

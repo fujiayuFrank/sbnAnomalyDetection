@@ -716,9 +716,10 @@ def _train_gnn(cfg: dict, root_files: list[str] | None = None) -> None:
         log_interval=int(train_cfg.get("log_interval", 50)),
         anomaly_threshold=train_cfg.get("anomaly_threshold"),
         save_best_only=bool(train_cfg.get("save_best_only", False)),
+        save_epoch_checkpoints=bool(train_cfg.get("save_epoch_checkpoints", True)),
         use_amp=bool(train_cfg.get("use_amp", False)),
         score_mode=str(train_cfg.get("score_mode", "mean")),
-    )
+    )   
 
     logger.info("Starting training (%d epochs) ...", int(train_cfg.get("max_epochs", 20)))
     t_train = time.perf_counter()
