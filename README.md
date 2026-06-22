@@ -140,14 +140,20 @@ model_type: gnn
 data:
   events_path: data/events_cache.npz   # sparse events NPZ (or use --root-files)
   tree_name: caloskim/TrackCaloSkim    # ROOT TTree path
-  hit_branches:                         # which hit branches to read
+  hit_branches:                        # which hit branches to read
     - hits0.h.integral
     - hits0.h.channel
+    - hits1.h.integral
+    - hits1.h.channel
     - hits2.h.integral
     - hits2.h.channel
+  tpc_branches:                        # optional event provenance branches
+    - meta.run
+    - meta.subrun
+    - meta.evt
   window_size: 20        # events per frame
   n_temporal_bins: 4     # bins within each frame
-  stride: 5              # step between consecutive windows
+  stride: 20             # step between consecutive windows
   adjacency_radius: 4    # channels within this radius are connected
   node_features:         # per-channel aggregates per bin
     - sum
@@ -160,29 +166,61 @@ data:
 model:
   history: 4             # number of past frames used to predict the next frame
   gnn_hidden: 64
-  gnn_layers: 2
-  gru_hidden: 128
+  gnn_layers: 3
+  gru_hidden: 256
+  gru_layers: 2
+  norm_type: batch       # options: none, batch, layer
 
 training:
-  batch_size: 32
-  num_workers: 4
-  lr: 0.001
-  max_epochs: 10
-  validation_split: 0.1
-  checkpoint_dir: checkpoints/gnn/
-  output_path: checkpoints/gnn/gnn_final.pt
-  save_events_path: data/events_cache.npz  # optional: cache events after loading
+  batch_size: 20
+  num_workers: 5
+  lr: 0.005
+  weight_decay: 1.0e-4
+  max_epochs: 100
+  validation_split: 0.15
+  checkpoint_dir: checkpoints/gnn/June-22-test
+  output_path: checkpoints/gnn/June-22-test/gnn_final.pt
+  log_interval: 50
+  use_amp: true
+
+  # Save weights/epoch_XXXX.pt after epochs.
+  # false saves disk space; final weights are still saved to output_path.
+  save_epoch_checkpoints: false
+
+  # How to reduce the two per-window anomaly scores returned by the GNN trainer.
+  # The trainer computes per-node MSE, then returns [mean, max] across nodes.
+  # score_mode=mean selects the mean across nodes; score_mode=max selects the max.
+  score_mode: mean
+
+inference:
+  checkpoint_path: checkpoints/gnn/June-22-test/gnn_final.pt
+  input_path: data/windows_test.npz
+  threshold: null
+  max_windows: null      # set to an integer to score only the first N windows
 ```
 
 ### Training output
 
 After training, the checkpoint directory contains:
-- `gnn_final.pt` — trained model weights
-- `training_history.csv` — per-epoch loss and validation loss
-- `training_curves.png` — loss curves
-- `score_distribution.png` — histogram of window anomaly scores on the training set
-- `score_over_time.png` — anomaly score vs window index (temporal trend)
-- `node_mse.png` — per-channel average prediction MSE (shows which wires are hardest to predict)
+
+* `gnn_final.pt` — final trained model weights saved from `training.output_path`
+* `training_history.csv` — per-epoch loss, validation loss, score percentiles, and timing metrics
+* `training_curves.png` — training and validation loss curves
+* `score_distribution.png` — histogram of window anomaly scores on the training set
+* `score_over_time.png` — anomaly score vs. window index using the non-shuffled training loader
+* `node_mse.png` — per-channel average prediction MSE, showing which wires are hardest to predict
+
+If `training.save_epoch_checkpoints: true`, the trainer also saves per-epoch checkpoints under:
+
+```text
+weights/
+  epoch_0001.pt
+  epoch_0002.pt
+  ...
+```
+
+If `training.save_epoch_checkpoints: false`, these per-epoch weight files are skipped to save disk space. The final model is still saved to `training.output_path`.
+
 
 ## GNN Inference
 
