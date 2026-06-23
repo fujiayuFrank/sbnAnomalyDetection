@@ -72,3 +72,6 @@ runs/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# working scratch files
+leaf_names.txt
