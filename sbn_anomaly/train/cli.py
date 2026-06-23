@@ -763,6 +763,7 @@ def _train_gnn(cfg: dict, root_files: list[str] | None = None) -> None:
         gru_hidden_dims,
         history,
     )
+    logger.info("Model architecture:\n%s", model)
 
     trainer = GNNTrainerPyG(
         model=model,
