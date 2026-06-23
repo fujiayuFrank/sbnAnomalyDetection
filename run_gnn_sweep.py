@@ -29,6 +29,9 @@ DEFAULT_CONFIG_DIR = PROJECT_DIR / "tunning_configs"
 # Store trained models under the usual checkpoint area.
 DEFAULT_MODEL_ROOT = PROJECT_DIR / "checkpoints" / "gnn"
 
+# Store each sweep run/model under checkpoints/gnn/<run_name>/
+DEFAULT_RUNS_ROOT = DEFAULT_MODEL_ROOT
+
 # Store database/export summaries directly in sbnAnomalyDetection path.
 DEFAULT_DB_PATH = PROJECT_DIR / "gnn_sweep.sqlite3"
 
@@ -354,27 +357,57 @@ def run_command(
     log_path: Path,
     timeout: int | None = None,
 ) -> int:
+    """Run command and stream output both to terminal and log file."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     with log_path.open("w") as log:
-        log.write(f"$ {' '.join(shlex.quote(x) for x in cmd)}\n")
-        log.write(f"cwd={cwd}\n")
-        log.write("=" * 80 + "\n")
+        header = (
+            f"$ {' '.join(shlex.quote(x) for x in cmd)}\n"
+            f"cwd={cwd}\n"
+            + "=" * 80
+            + "\n"
+        )
+        log.write(header)
         log.flush()
+        print(header, end="")
 
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
-            stdout=log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout,
+            bufsize=1,
         )
 
-        log.write("\n" + "=" * 80 + "\n")
-        log.write(f"returncode={proc.returncode}\n")
+        start_time = time.perf_counter()
 
-    return int(proc.returncode)
+        try:
+            assert proc.stdout is not None
+
+            for line in proc.stdout:
+                print(line, end="")
+                log.write(line)
+                log.flush()
+
+                if timeout is not None and time.perf_counter() - start_time > timeout:
+                    proc.kill()
+                    proc.wait()
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+
+            returncode = proc.wait()
+
+        except Exception:
+            proc.kill()
+            proc.wait()
+            raise
+
+        footer = "\n" + "=" * 80 + "\n" + f"returncode={returncode}\n"
+        log.write(footer)
+        log.flush()
+        print(footer, end="")
+
+    return int(returncode)
 
 
 # ============================================================
