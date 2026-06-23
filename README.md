@@ -196,9 +196,10 @@ training:
 
 inference:
   checkpoint_path: checkpoints/gnn/June-22-test/gnn_final.pt
-  input_path: data/windows_test.npz
+  input_path: /exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/data/windows_test.npz
+  output_path: checkpoints/gnn/June-22-test/inference_scores.npz
   threshold: null
-  max_windows: null      # set to an integer to score only the first N windows
+  max_windows: null  # set to an integer to score only the first N windows
 ```
 
 ### Training output

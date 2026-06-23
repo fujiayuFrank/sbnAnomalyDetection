@@ -68,8 +68,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=str,
-        default="scores.npy",
-        help="Path to save anomaly scores (.npy).",
+        default=None,
+        help=(
+            "Path to save anomaly scores. "
+            "Overrides inference.output_path in the config."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -97,9 +100,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("inference.checkpoint_path not set in config.")
         return 1
 
+    output_path = args.output or infer_cfg.get("output_path") or "scores.npy"
+
     # GNN uses a separate PyG-based inference path with per-node output
     if model_type == "gnn":
-        _infer_gnn(cfg, checkpoint, args.output)
+        _infer_gnn(cfg, checkpoint, output_path)
         return 0
 
     scorer = _build_scorer(cfg, model_type, checkpoint)
@@ -183,7 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         if data_cfg.get("hit_branches"):
             meta["hit_branches"] = np.asarray(data_cfg.get("hit_branches"), dtype=str)
 
-    out_path = Path(args.output)
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     # If user requested an .npz file, save scores + metadata into it. Otherwise
     # save the numeric scores as .npy and write a companion metadata .npz.
     if out_path.suffix.lower() == ".npz":
@@ -288,6 +294,7 @@ def _score_tpc_from_root(
         return np.empty((0,), dtype=np.float32)
 
     return np.concatenate(score_chunks)
+
 def _infer_gnn(cfg: dict, checkpoint: str, output: str) -> None:
     """Run per-node GNN inference and save results as a compressed npz archive.
             input_dim = model_cfg.get("input_dim", 256)
@@ -453,6 +460,9 @@ def _infer_gnn(cfg: dict, checkpoint: str, output: str) -> None:
     out_path = Path(output)
     if out_path.suffix.lower() != ".npz":
         out_path = out_path.with_suffix(".npz")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     np.savez_compressed(out_path, **save_dict)
     logger.info("Saved GNN scores to %s", out_path)
 
