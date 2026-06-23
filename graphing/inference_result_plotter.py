@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 # Input / output
 # ============================================================
 
-npz_path = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/June-22-scores.npz"
+npz_path = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/checkpoints/gnn/June-22-test/inference_scores.npz"
 
 out_dir = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/inference_result_plots/June-22-scores"
 os.makedirs(out_dir, exist_ok=True)
