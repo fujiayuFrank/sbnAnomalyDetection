@@ -545,6 +545,45 @@ def _train_window(cfg: dict) -> None:
     logging.getLogger(__name__).info("Window training complete.")
 
 
+def _get_hidden_dims(
+    model_cfg: dict,
+    *,
+    new_key: str,
+    old_hidden_key: str,
+    old_layers_key: str,
+    default_hidden: int,
+    default_layers: int,
+) -> list[int]:
+    """Read variable hidden dims from config, with backward-compatible fallback.
+
+    Preferred:
+        gnn_hidden_dims: [192, 96]
+
+    Backward-compatible fallback:
+        gnn_hidden: 64
+        gnn_layers: 3
+        -> [64, 64, 64]
+    """
+    if new_key in model_cfg and model_cfg[new_key] is not None:
+        dims = model_cfg[new_key]
+    elif "hidden_dims" in model_cfg and model_cfg["hidden_dims"] is not None:
+        dims = model_cfg["hidden_dims"]
+    else:
+        hidden = int(model_cfg.get(old_hidden_key, default_hidden))
+        layers = int(model_cfg.get(old_layers_key, default_layers))
+        dims = [hidden] * layers
+
+    if not isinstance(dims, (list, tuple)) or len(dims) == 0:
+        raise ValueError(f"{new_key} must be a non-empty list of positive integers")
+
+    dims = [int(d) for d in dims]
+
+    if any(d <= 0 for d in dims):
+        raise ValueError(f"{new_key} must contain only positive integers, got {dims}")
+
+    return dims
+
+
 def _train_gnn(cfg: dict, root_files: list[str] | None = None) -> None:
     import numpy as np
     import time
@@ -685,13 +724,30 @@ def _train_gnn(cfg: dict, root_files: list[str] | None = None) -> None:
         validation_loader = PyGDataLoader(val_dataset, batch_size=val_batch_size, shuffle=False, num_workers=num_workers, persistent_workers=persistent)
 
     logger.info("Building model ...")
+
+    gnn_hidden_dims = _get_hidden_dims(
+        model_cfg,
+        new_key="gnn_hidden_dims",
+        old_hidden_key="gnn_hidden",
+        old_layers_key="gnn_layers",
+        default_hidden=64,
+        default_layers=2,
+    )
+
+    gru_hidden_dims = _get_hidden_dims(
+        model_cfg,
+        new_key="gru_hidden_dims",
+        old_hidden_key="gru_hidden",
+        old_layers_key="gru_layers",
+        default_hidden=128,
+        default_layers=1,
+    )
+
     model = GNNForecasterPyG(
         frame_feat_dim=frame_feat_dim,
         target_dim=frame_feat_dim,
-        gnn_hidden=int(model_cfg.get("gnn_hidden", 64)),
-        gnn_layers=int(model_cfg.get("gnn_layers", 2)),
-        gru_hidden=int(model_cfg.get("gru_hidden", 128)),
-        gru_layers=int(model_cfg.get("gru_layers", 1)),
+        gnn_hidden_dims=gnn_hidden_dims,
+        gru_hidden_dims=gru_hidden_dims,
         history=history,
         dropout=float(model_cfg.get("dropout", 0.1)),
         norm_type=str(model_cfg.get("norm_type", "none")),
@@ -699,11 +755,12 @@ def _train_gnn(cfg: dict, root_files: list[str] | None = None) -> None:
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(
-        "Model: GNNForecasterPyG  params=%d  frame_feat_dim=%d  gnn_layers=%d  "
-        "gnn_hidden=%d  gru_layers=%d  gru_hidden=%d  history=%d",
-        n_params, frame_feat_dim,
-        int(model_cfg.get("gnn_layers", 2)), int(model_cfg.get("gnn_hidden", 64)),
-        int(model_cfg.get("gru_layers", 1)), int(model_cfg.get("gru_hidden", 128)),
+        "Model: GNNForecasterPyG  params=%d  frame_feat_dim=%d  "
+        "gnn_hidden_dims=%s  gru_hidden_dims=%s  history=%d",
+        n_params,
+        frame_feat_dim,
+        gnn_hidden_dims,
+        gru_hidden_dims,
         history,
     )
 

@@ -4,19 +4,19 @@ Streaming anomaly detection pipeline for the [Short-Baseline Neutrino (SBN)](htt
 
 ## Primary Architecture — GNN Forecaster
 
-The current model is a **graph neural network forecaster** (`GNNForecasterPyG`) that treats TPC channels as nodes in a spatial graph and learns to predict the next time window from a history of past windows. Anomaly scores are the per-channel MSE between the predicted and actual next window.
+The current model is a **graph neural network forecaster** (`GNNForecasterPyG`) that treats TPC channels as nodes in a spatial graph and learns to predict the next time window from a history of past windows. The graph encoder uses PyG `GCNConv` layers, and both the graph encoder and temporal GRU stack are configured with variable hidden-dimension lists. Anomaly scores are the per-channel MSE between the predicted and actual next window.
 
 ```
 Past windows (history × window_size events)
         │
         ▼
   ┌─────────────┐   for each time step
-  │  GCN layers │◄── spatial message passing between neighboring channels
+  │ GNN encoder │◄── GCNConv message passing between neighboring channels
   └──────┬──────┘
          │ node embeddings
          ▼
   ┌─────────────┐
-  │     GRU     │   temporal encoding over history steps
+  │  GRU stack  │   temporal encoding over history steps
   └──────┬──────┘
          │
          ▼
@@ -36,7 +36,8 @@ Past windows (history × window_size events)
 | Graph nodes | TPC channels (wires) |
 | Graph edges | Channels within configurable `adjacency_radius` of each other |
 | Node features | Per-channel aggregates per temporal bin: `sum`, `min`, `max`, `mean`, `stdev`, `count` |
-| Temporal model | GRU over `history` past frames |
+| Graph model | Variable-width `GCNConv` stack configured by `model.gnn_hidden_dims` |
+| Temporal model | Variable-width GRU stack configured by `model.gru_hidden_dims` over `history` past frames |
 | Anomaly score | Per-channel MSE between predicted and actual next frame |
 | Pruning | Only active channels (non-zero across history) are included in each graph |
 
@@ -53,7 +54,8 @@ sbnAnomalyDetection/
 │   │   ├── stream_dataset.py         # TPCStreamDataset for TPC autoencoder
 │   │   └── dataset.py                # Map-style datasets (TPC, PMT, Fusion, Window)
 │   ├── models/
-│   │   ├── gnn_forecaster_pyg.py     # GNNForecasterPyG — primary model
+│   │   ├── gnn_forecaster_pyg.py     # GNNForecasterPyG — primary sparse PyG model
+│   │   ├── gnn_model.py              # Dense-adjacency legacy GNNForecaster
 │   │   ├── tpc_model.py              # TPCAutoencoder
 │   │   ├── pmt_model.py              # PMTAutoencoder
 │   │   ├── fusion_model.py           # FusionAutoencoder
@@ -71,8 +73,19 @@ sbnAnomalyDetection/
 │   ├── tpc.yaml
 │   ├── pmt.yaml
 │   └── ...
+├── tunning_configs/                  # GNN batch configs used for parameter tuning
+│   ├── gnn_config1.yaml
+│   └── ...
+├── run_gnn_sweep.py                  # Runs all/specified YAML configs from tunning_configs/
+│
 ├── tests/
-├── pyproject.toml
+│   ├── __init__.py
+│   ├── test_ablation.py              # Ablation/evaluation workflow tests
+│   ├── test_data.py                  # Dataset and data-loading tests
+│   ├── test_infer.py                 # Inference/scoring tests
+│   ├── test_models.py                # Model construction/forward-pass tests
+│   ├── test_stream_dataset.py        # ROOT streaming dataset tests
+│   └── test_train.py                 # Training-loop and trainer tests
 ├── graphing/
 │    ├── plot_wrapper.C               # hits2.h.integral histogram plotter
 │    ├── plot_wrapper.py
@@ -80,7 +93,7 @@ sbnAnomalyDetection/
 │    ├── plot_channelhist.C           # hits2.h.channel histogram plotter
 │    ├── plot_channelhist.py
 │    ├── channel_time_plot.C          # per channel integral value with time line chart plotter
-│    └── inference_result_plotter.py  # model inference score historgram plotter
+│    └── inference_result_plotter.py  # model inference score histogram plotter
 └── pyproject.toml
 ```
 
@@ -134,6 +147,24 @@ Then run without `--root-files`:
 sbn-train --config configs/gnn.yaml
 ```
 
+### Running a GNN parameter sweep
+
+The top-level `run_gnn_sweep.py` script is used for batch GNN experiments. It runs a list of YAML configuration files from `tunning_configs/`, so each sweep configuration can keep its own model dimensions, training settings, checkpoint directory, and output paths.
+
+Typical usage:
+
+```bash
+python run_gnn_sweep.py
+```
+
+Each YAML in `tunning_configs/` should follow the same structure as `configs/gnn.yaml`, including list-style hidden dimensions such as:
+
+```yaml
+model:
+  gnn_hidden_dims: [128, 128, 64]
+  gru_hidden_dims: [256, 128]
+```
+
 ### Key config parameters
 
 ```yaml
@@ -167,11 +198,19 @@ data:
 
 model:
   history: 4             # number of past frames used to predict the next frame
-  gnn_hidden: 64
-  gnn_layers: 3
-  gru_hidden: 256
-  gru_layers: 2
+
+  # Variable graph encoder dimensions.
+  # Number of GNN/GCNConv layers = len(gnn_hidden_dims).
+  # Example: [128, 128, 64] means input -> 128 -> 128 -> 64.
+  gnn_hidden_dims: [128, 128, 64]
+
+  # Variable temporal GRU dimensions.
+  # Number of GRU layers = len(gru_hidden_dims).
+  # Example: [256, 128] means GNN output -> 256 -> 128.
+  gru_hidden_dims: [256, 128]
+
   norm_type: batch       # options: none, batch, layer
+  dropout: 0.1
 
 training:
   batch_size: 20
@@ -202,11 +241,28 @@ inference:
   max_windows: null  # set to an integer to score only the first N windows
 ```
 
+The hidden-dimension lists replace the old fixed-size fields:
+
+```yaml
+# Old style — no longer preferred
+gnn_hidden: 64
+gnn_layers: 3
+gru_hidden: 256
+gru_layers: 2
+
+# Current style
+gnn_hidden_dims: [128, 128, 64]
+gru_hidden_dims: [256, 128]
+```
+
+`gnn_hidden_dims` configures the general graph-neural-network encoder. In the current implementation, that encoder is built from PyG `GCNConv` layers, so the code may call these internal modules `gcn_layers` or `gnn_layers_list`. `gru_hidden_dims` configures a stack of one-layer GRUs, which allows different hidden sizes per temporal layer. A single multi-layer `nn.GRU` is not used for variable hidden dimensions because PyTorch requires all layers in one `nn.GRU` to share the same `hidden_size`.
+
 ### Training output
 
-After training, the checkpoint directory contains:
+After training, the checkpoint directory contains the artifacts for that model run:
 
 * `gnn_final.pt` — final trained model weights saved from `training.output_path`
+* `config_original.yaml` or `config_run.yaml` — a copy of the YAML used for the run, when config-copying is enabled in the training/sweep wrapper
 * `training_history.csv` — per-epoch loss, validation loss, score percentiles, and timing metrics
 * `training_curves.png` — training and validation loss curves
 * `score_distribution.png` — histogram of window anomaly scores on the training set
@@ -223,6 +279,8 @@ weights/
 ```
 
 If `training.save_epoch_checkpoints: false`, these per-epoch weight files are skipped to save disk space. The final model is still saved to `training.output_path`.
+
+For sweep or batch-training workflows, keep each model's full artifacts under its own directory such as `checkpoints/gnn/model1/`, `checkpoints/gnn/model2/`, etc. Shared sweep summaries such as SQLite/CSV/XLSX files can remain in the main project directory.
 
 
 ## GNN Inference
@@ -285,6 +343,7 @@ dataset = SparseWindowDatasetPyG.from_root(
     radius=4,
 )
 dataset.save_events("events_cache.npz")  # cache for future runs
+```
 
 ### Materialize windows / events (.npz)
 
@@ -395,7 +454,6 @@ sbn-infer --config configs/gnn.yaml \
   --output scores_from_manifest.npz
 ```
 
-```
 
 ## Legacy Autoencoder Models
 

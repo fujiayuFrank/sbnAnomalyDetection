@@ -34,7 +34,7 @@ data:
   # Rolling-window materializer options
   window_size: 20
   n_temporal_bins: 4
-  stride: 20
+  stride: 10
   adjacency_radius: 4
   
   # Per-channel node features computed for each temporal bin
@@ -51,18 +51,18 @@ data:
 
 model:
   # Number of past windows used to predict the next window
-  history: 4
+  history: 2
   # Node feature dimension; if omitted, trainer will use windows.shape[-1]
   node_feat_dim: null
   
   # GNN / temporal architecture
   # Variable GNN hidden dimensions.
   # Number of GNN layers = len(gnn_hidden_dims)
-  gnn_hidden_dims: [128, 128, 64]
+  gnn_hidden_dims: [128, 64, 32]
 
   # Variable temporal GRU hidden dimensions.
   # Number of GRU layers = len(gru_hidden_dims)
-  gru_hidden_dims: [256, 128]
+  gru_hidden_dims: [128, 64]
 
   # Input normalization applied to each frame before the GCN stack.
   # Options: "none", "batch" (BatchNorm1d per feature), "layer" (LayerNorm per node)
