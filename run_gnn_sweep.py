@@ -170,6 +170,48 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+
+def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
+    """Delete any existing DB records for this run_name before rerunning.
+
+    This makes reruns overwrite the previous database entry instead of failing with:
+        UNIQUE constraint failed: experiments.run_name
+
+    The run directory itself is reused; files like config_run.yaml, gnn_final.pt,
+    scores.npz, and plots are overwritten by the new train/infer commands.
+    """
+    rows = conn.execute(
+        "SELECT id, status FROM experiments WHERE run_name = ?",
+        (run_name,),
+    ).fetchall()
+
+    if not rows:
+        return
+
+    ids = [int(row[0]) for row in rows]
+    statuses = [str(row[1]) for row in rows]
+    placeholders = ",".join("?" for _ in ids)
+
+    print(
+        f"Existing DB record(s) for run_name={run_name!r} found "
+        f"with status={statuses}; overwriting.",
+        flush=True,
+    )
+
+    conn.execute(
+        f"DELETE FROM params WHERE experiment_id IN ({placeholders})",
+        ids,
+    )
+    conn.execute(
+        f"DELETE FROM metrics WHERE experiment_id IN ({placeholders})",
+        ids,
+    )
+    conn.execute(
+        f"DELETE FROM experiments WHERE id IN ({placeholders})",
+        ids,
+    )
+    conn.commit()
+
 def insert_experiment(
     conn: sqlite3.Connection,
     *,
@@ -350,13 +392,85 @@ def prepare_run_config(
 # Subprocess execution
 # ============================================================
 
+def format_bytes(n: float) -> str:
+    """Human-readable byte formatting."""
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(n)
+    for unit in units:
+        if value < 1024.0:
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} PB"
+
+
+def get_process_usage_text(
+    proc: subprocess.Popen,
+    label: str = "resource",
+    *,
+    sample_seconds: float = 0.5,
+) -> str:
+    """Return CPU/memory usage text for the subprocess tree.
+
+    CPU is sampled over sample_seconds, so 100% means one full CPU core
+    during that sample window. Values above 100% mean multiple cores.
+    RSS is summed across the process tree and may over-count shared memory.
+    """
+    lines = [f"\n[{now_str()}] {label} usage"]
+
+    try:
+        import psutil
+
+        parent = psutil.Process(proc.pid)
+        processes = [parent] + parent.children(recursive=True)
+
+        live_processes = []
+        for p in processes:
+            try:
+                # First call primes psutil's CPU counter for this process object.
+                p.cpu_percent(interval=None)
+                live_processes.append(p)
+            except psutil.NoSuchProcess:
+                pass
+
+        # Measure over a real short interval. This avoids the common all-0.0% issue.
+        time.sleep(sample_seconds)
+
+        total_cpu = 0.0
+        total_rss = 0
+
+        for p in live_processes:
+            try:
+                total_cpu += p.cpu_percent(interval=None)
+                total_rss += p.memory_info().rss
+            except psutil.NoSuchProcess:
+                pass
+
+        lines.append(
+            f"  Process tree: {len(live_processes)} process(es) | "
+            f"CPU: {total_cpu:.1f}% over {sample_seconds:.1f}s sample | "
+            f"RSS: {format_bytes(total_rss)}"
+        )
+
+    except Exception as exc:
+        lines.append(f"  Process usage unavailable: {exc}")
+
+    return "\n".join(lines) + "\n"
+
+
 def run_command(
     cmd: list[str],
     *,
     cwd: Path,
     timeout: int | None = None,
+    monitor_interval: int = 30,
 ) -> int:
-    """Run command directly in terminal without capturing output."""
+    """Run command, show its output, and periodically inject resource usage.
+
+    The child process output is captured and immediately reprinted by this wrapper.
+    This lets the wrapper insert resource logs into the same visible terminal stream.
+    """
+    import selectors
+
     header = (
         f"$ {' '.join(shlex.quote(x) for x in cmd)}\n"
         f"cwd={cwd}\n"
@@ -365,17 +479,78 @@ def run_command(
     )
     print(header, end="", flush=True)
 
-    try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            timeout=timeout,
-        )
-        returncode = completed.returncode
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
 
-    except subprocess.TimeoutExpired:
-        print(f"\nCommand timed out after {timeout} seconds.")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=None,
+        bufsize=0,
+        env=env,
+    )
+
+    start_time = time.perf_counter()
+    last_monitor = start_time
+
+    selector = selectors.DefaultSelector()
+    assert proc.stdout is not None
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    stdout_open = True
+    returncode: int | None = None
+
+    try:
+        while True:
+            now = time.perf_counter()
+
+            if timeout is not None and now - start_time > timeout:
+                proc.kill()
+                proc.wait()
+                print(f"\nCommand timed out after {timeout} seconds.", flush=True)
+                raise subprocess.TimeoutExpired(cmd, timeout)
+
+            # Reprint any training/inference output that is ready.
+            if stdout_open:
+                events = selector.select(timeout=0.2)
+                for key, _ in events:
+                    chunk = os.read(key.fileobj.fileno(), 4096)
+                    if chunk:
+                        sys.stdout.buffer.write(chunk)
+                        sys.stdout.buffer.flush()
+                    else:
+                        # EOF. The child closed stdout; stop watching this pipe.
+                        try:
+                            selector.unregister(key.fileobj)
+                        except Exception:
+                            pass
+                        stdout_open = False
+
+            returncode = proc.poll()
+            now = time.perf_counter()
+
+            if monitor_interval > 0 and returncode is None and now - last_monitor >= monitor_interval:
+                print(get_process_usage_text(proc, "during command"), end="", flush=True)
+                last_monitor = time.perf_counter()
+
+            # Safe to leave only when child is done and stdout pipe has reached EOF.
+            if returncode is not None and not stdout_open:
+                break
+
+            # If child ended but the pipe still has data, loop again to drain it.
+            if returncode is not None and stdout_open:
+                continue
+
+    except KeyboardInterrupt:
+        proc.terminate()
         raise
+
+    finally:
+        try:
+            selector.close()
+        except Exception:
+            pass
 
     footer = "\n" + "=" * 80 + "\n" + f"returncode={returncode}\n"
     print(footer, end="", flush=True)
@@ -654,6 +829,11 @@ def run_sweep(args: argparse.Namespace) -> int:
         config_stem = safe_name(config_path.stem)
         run_name = f"{config_stem}"
         run_dir = runs_root / run_name
+
+        # Always overwrite the previous DB record for the same config/run name.
+        # This prevents SQLite UNIQUE constraint failures when rerunning a YAML.
+        delete_existing_experiment(conn, run_name)
+
         run_dir.mkdir(parents=True, exist_ok=True)
 
         run_config_path = run_dir / "config_run.yaml"
@@ -709,6 +889,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                 train_cmd,
                 cwd=PROJECT_DIR,
                 timeout=args.timeout,
+                monitor_interval=args.monitor_interval,
             )
             if train_returncode != 0:
                 raise RuntimeError(f"Training failed with return code {train_returncode}")
@@ -722,6 +903,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                     infer_cmd,
                     cwd=PROJECT_DIR,
                     timeout=args.timeout,
+                    monitor_interval=args.monitor_interval,
                 )
                 if infer_returncode != 0:
                     raise RuntimeError(f"Inference failed with return code {infer_returncode}")
@@ -819,6 +1001,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--stop-on-error",
         action="store_true",
         help="Stop the sweep after the first failed config.",
+    )
+    parser.add_argument(
+        "--monitor-interval",
+        type=int,
+        default=30,
+        help="Print CPU/RAM usage every N seconds during train/infer. Set 0 to disable.",
     )
 
     return parser

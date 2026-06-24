@@ -157,6 +157,49 @@ Typical usage:
 python run_gnn_sweep.py
 ```
 
+The current sweep wrapper also handles per-run output management, reruns, inference, and resource monitoring. For each YAML file, the wrapper creates/reuses a run directory under `checkpoints/gnn/<config_stem>/`, writes a patched `config_run.yaml` there, trains the model, then runs inference with the newly saved checkpoint. If a run with the same name already exists in the SQLite database, the wrapper deletes the old database rows and overwrites the run outputs instead of failing with a duplicate-name error.
+
+Example:
+
+```bash
+python run_gnn_sweep.py \
+  --config-dir tuning_configs \
+  --pattern "*.yaml" \
+  --monitor-interval 30
+```
+
+Useful options:
+
+| Option | Meaning |
+|--------|---------|
+| `--config-dir` | Directory containing sweep YAML files. Default: `tuning_configs/`. |
+| `--pattern` | Glob pattern for selecting configs, e.g. `gnn_test*.yaml`. |
+| `--runs-root` | Root directory for per-model output folders. Default: `checkpoints/gnn/`. |
+| `--db-path` | SQLite summary database path. Default: `gnn_sweep.sqlite3` in the project directory. |
+| `--skip-infer` | Train only; do not run inference after training. |
+| `--stop-on-error` | Stop after the first failed config. |
+| `--monitor-interval N` | Print resource usage every `N` seconds while training or inference is running. Use `0` to disable. |
+
+The monitor output is injected directly into the visible terminal stream, so it remains visible even while training progress bars and logging output are being printed. A typical line looks like:
+
+```text
+[2026-06-24T20:27:19] during command usage
+  Process tree: 11 process(es) | CPU: 3072.3% over 0.5s sample | RSS: 10.5 GB
+```
+
+Interpretation:
+
+* `Process tree` means the wrapper is monitoring the launched `sbn-train` or `sbn-infer` process plus its child processes, such as PyTorch DataLoader workers.
+* `CPU` is sampled over a short window. `100%` means one full CPU core during that sample; `200%` means about two cores; values above `100%` are normal for multi-process or multi-threaded PyTorch jobs.
+* `RSS` is the summed resident memory of the process tree. It is useful for tracking approximate memory use, but it can over-count shared pages between forked workers.
+
+The monitor interval controls how often the resource block is printed, not the averaging window of the CPU value. For example, `--monitor-interval 30` prints once every 30 seconds, but each CPU value is still a short sample. Use a smaller interval such as `10` for more frequent feedback, or `0` to turn monitoring off:
+
+```bash
+python run_gnn_sweep.py --monitor-interval 10
+python run_gnn_sweep.py --monitor-interval 0
+```
+
 Each YAML in `tunning_configs/` should follow the same structure as `configs/gnn.yaml`, including list-style hidden dimensions such as:
 
 ```yaml
