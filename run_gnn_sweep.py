@@ -24,7 +24,7 @@ import yaml
 # ============================================================
 
 PROJECT_DIR = Path("/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection")
-DEFAULT_CONFIG_DIR = PROJECT_DIR / "tunning_configs"
+DEFAULT_CONFIG_DIR = PROJECT_DIR / "tuning_configs"
 
 # Store trained models under the usual checkpoint area.
 DEFAULT_MODEL_ROOT = PROJECT_DIR / "checkpoints" / "gnn"
