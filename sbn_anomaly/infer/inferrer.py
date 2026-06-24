@@ -69,7 +69,21 @@ class GNNScorer:
         state = torch.load(str(checkpoint_path), map_location=device)
         if isinstance(state, dict) and "model_state_dict" in state:
             state = state["model_state_dict"]
-        model.load_state_dict(state)
+        try:
+            model.load_state_dict(state)
+        except RuntimeError as exc:
+            logger.error(
+                "Failed to load GNN checkpoint %s into model architecture:\n%s",
+                checkpoint_path,
+                model,
+            )
+            logger.error("Original load_state_dict error: %s", exc)
+            logger.error(
+                "This usually means inference reconstructed the model with different "
+                "gnn_hidden_dims/gru_hidden_dims/history/frame_feat_dim than training."
+            )
+            raise
+
         logger.info("Loaded GNN weights from %s", checkpoint_path)
         return cls(model=model, num_channels=num_channels, device=device, threshold=threshold)
 

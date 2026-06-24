@@ -182,8 +182,8 @@ def insert_experiment(
     final_model_path: Path,
     train_cmd: list[str],
     infer_cmd: list[str],
-    train_log_path: Path,
-    infer_log_path: Path,
+    train_log_path: Path | None,
+    infer_log_path: Path | None,
     patched_cfg: dict[str, Any],
 ) -> int:
     cur = conn.execute(
@@ -218,8 +218,8 @@ def insert_experiment(
             now_str(),
             " ".join(shlex.quote(x) for x in train_cmd),
             " ".join(shlex.quote(x) for x in infer_cmd),
-            str(train_log_path),
-            str(infer_log_path),
+            str(train_log_path) if train_log_path else None,
+            str(infer_log_path) if infer_log_path else None,
             json.dumps(patched_cfg, default=jsonable),
         ),
     )
@@ -354,58 +354,31 @@ def run_command(
     cmd: list[str],
     *,
     cwd: Path,
-    log_path: Path,
     timeout: int | None = None,
 ) -> int:
-    """Run command and stream output both to terminal and log file."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    """Run command directly in terminal without capturing output."""
+    header = (
+        f"$ {' '.join(shlex.quote(x) for x in cmd)}\n"
+        f"cwd={cwd}\n"
+        + "=" * 80
+        + "\n"
+    )
+    print(header, end="", flush=True)
 
-    with log_path.open("w") as log:
-        header = (
-            f"$ {' '.join(shlex.quote(x) for x in cmd)}\n"
-            f"cwd={cwd}\n"
-            + "=" * 80
-            + "\n"
-        )
-        log.write(header)
-        log.flush()
-        print(header, end="")
-
-        proc = subprocess.Popen(
+    try:
+        completed = subprocess.run(
             cmd,
             cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            timeout=timeout,
         )
+        returncode = completed.returncode
 
-        start_time = time.perf_counter()
+    except subprocess.TimeoutExpired:
+        print(f"\nCommand timed out after {timeout} seconds.")
+        raise
 
-        try:
-            assert proc.stdout is not None
-
-            for line in proc.stdout:
-                print(line, end="")
-                log.write(line)
-                log.flush()
-
-                if timeout is not None and time.perf_counter() - start_time > timeout:
-                    proc.kill()
-                    proc.wait()
-                    raise subprocess.TimeoutExpired(cmd, timeout)
-
-            returncode = proc.wait()
-
-        except Exception:
-            proc.kill()
-            proc.wait()
-            raise
-
-        footer = "\n" + "=" * 80 + "\n" + f"returncode={returncode}\n"
-        log.write(footer)
-        log.flush()
-        print(footer, end="")
+    footer = "\n" + "=" * 80 + "\n" + f"returncode={returncode}\n"
+    print(footer, end="", flush=True)
 
     return int(returncode)
 
@@ -679,14 +652,14 @@ def run_sweep(args: argparse.Namespace) -> int:
         t0 = time.perf_counter()
 
         config_stem = safe_name(config_path.stem)
-        run_name = f"{idx:04d}_{config_stem}_{timestamp_for_name()}"
+        run_name = f"{config_stem}"
         run_dir = runs_root / run_name
         run_dir.mkdir(parents=True, exist_ok=True)
 
         run_config_path = run_dir / "config_run.yaml"
         original_copy_path = run_dir / "config_original.yaml"
-        train_log_path = run_dir / "train.log"
-        infer_log_path = run_dir / "infer.log"
+        # train_log_path = run_dir / "train.log"
+        # infer_log_path = run_dir / "infer.log"
 
         print("\n" + "=" * 80)
         print(f"[{idx}/{len(config_paths)}] {config_path}")
@@ -708,7 +681,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                 run_dir,
             )
 
-            save_yaml(original_copy_path, original_cfg)
+            # save_yaml(original_copy_path, original_cfg)
             save_yaml(run_config_path, patched_cfg)
 
             train_cmd = train_base_cmd + ["--config", str(run_config_path)]
@@ -725,8 +698,8 @@ def run_sweep(args: argparse.Namespace) -> int:
                 final_model_path=final_model_path,
                 train_cmd=train_cmd,
                 infer_cmd=infer_cmd,
-                train_log_path=train_log_path,
-                infer_log_path=infer_log_path,
+                train_log_path=None,
+                infer_log_path=None,
                 patched_cfg=patched_cfg,
             )
             insert_params(conn, experiment_id, patched_cfg)
@@ -735,7 +708,6 @@ def run_sweep(args: argparse.Namespace) -> int:
             train_returncode = run_command(
                 train_cmd,
                 cwd=PROJECT_DIR,
-                log_path=train_log_path,
                 timeout=args.timeout,
             )
             if train_returncode != 0:
@@ -749,7 +721,6 @@ def run_sweep(args: argparse.Namespace) -> int:
                 infer_returncode = run_command(
                     infer_cmd,
                     cwd=PROJECT_DIR,
-                    log_path=infer_log_path,
                     timeout=args.timeout,
                 )
                 if infer_returncode != 0:

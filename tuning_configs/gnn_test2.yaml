@@ -75,8 +75,8 @@ training:
   lr: 0.005
   weight_decay: 1.0e-4
   max_epochs: 100
-  checkpoint_dir: checkpoints/gnn/June-22-test
-  output_path: checkpoints/gnn/June-22-test/gnn_final.pt
+  checkpoint_dir: checkpoints/gnn/gnn_test2
+  output_path: checkpoints/gnn/gnn_test2/gnn_final.pt
   log_interval: 50
   validation_split: 0.15
   use_amp: true
@@ -91,8 +91,8 @@ training:
   score_mode: mean
 
 inference:
-  checkpoint_path: checkpoints/gnn/June-22-test/gnn_final.pt
+  checkpoint_path: checkpoints/gnn/gnn_test2/gnn_final.pt
   input_path: /exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/data/windows_test.npz
-  output_path: checkpoints/gnn/June-22-test/inference_scores.npz
+  output_path: checkpoints/gnn/gnn_test2/inference_scores.npz
   threshold: null
   max_windows: null  # set to an integer to score only the first N windows

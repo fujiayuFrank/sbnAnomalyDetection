@@ -202,6 +202,45 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Saved %d anomaly scores to %s and metadata to %s", len(scores), out_path, meta_path)
     return 0
 
+def _get_hidden_dims(
+    model_cfg: dict,
+    *,
+    new_key: str,
+    old_hidden_key: str,
+    old_layers_key: str,
+    default_hidden: int,
+    default_layers: int,
+) -> list[int]:
+    """Read variable hidden dims from config, with backward-compatible fallback.
+
+    Preferred new config:
+        gnn_hidden_dims: [128, 64, 32]
+        gru_hidden_dims: [128, 64]
+
+    Old config fallback:
+        gnn_hidden: 64
+        gnn_layers: 3
+        -> [64, 64, 64]
+    """
+    if new_key in model_cfg and model_cfg[new_key] is not None:
+        dims = model_cfg[new_key]
+    elif "hidden_dims" in model_cfg and model_cfg["hidden_dims"] is not None:
+        # Optional shared fallback, only used if specific key is absent.
+        dims = model_cfg["hidden_dims"]
+    else:
+        hidden = int(model_cfg.get(old_hidden_key, default_hidden))
+        layers = int(model_cfg.get(old_layers_key, default_layers))
+        dims = [hidden] * layers
+
+    if not isinstance(dims, (list, tuple)) or len(dims) == 0:
+        raise ValueError(f"{new_key} must be a non-empty list of positive integers")
+
+    dims = [int(d) for d in dims]
+
+    if any(d <= 0 for d in dims):
+        raise ValueError(f"{new_key} must contain only positive integers, got {dims}")
+
+    return dims
 
 def _truncate_or_pad(features: np.ndarray, target_dim: int) -> np.ndarray:
     """Truncate or pad feature array to target dimension."""
@@ -400,17 +439,45 @@ def _infer_gnn(cfg: dict, checkpoint: str, output: str) -> None:
         num_workers=int(infer_cfg.get("num_workers", 4)),
     )
 
+    gnn_hidden_dims = _get_hidden_dims(
+        model_cfg,
+        new_key="gnn_hidden_dims",
+        old_hidden_key="gnn_hidden",
+        old_layers_key="gnn_layers",
+        default_hidden=64,
+        default_layers=2,
+    )
+
+    gru_hidden_dims = _get_hidden_dims(
+        model_cfg,
+        new_key="gru_hidden_dims",
+        old_hidden_key="gru_hidden",
+        old_layers_key="gru_layers",
+        default_hidden=128,
+        default_layers=1,
+    )
+
     model = GNNForecasterPyG(
         frame_feat_dim=frame_feat_dim,
         target_dim=frame_feat_dim,
-        gnn_hidden=int(model_cfg.get("gnn_hidden", 64)),
-        gnn_layers=int(model_cfg.get("gnn_layers", 2)),
-        gru_hidden=int(model_cfg.get("gru_hidden", 128)),
-        gru_layers=int(model_cfg.get("gru_layers", 1)),
+        gnn_hidden_dims=gnn_hidden_dims,
+        gru_hidden_dims=gru_hidden_dims,
         history=history,
         dropout=float(model_cfg.get("dropout", 0.1)),
-        norm_type=model_cfg.get("norm_type", "batch"),
+        norm_type=str(model_cfg.get("norm_type", "batch")),
     )
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(
+        "Reconstructed GNNForecasterPyG for inference: params=%d  "
+        "frame_feat_dim=%d  gnn_hidden_dims=%s  gru_hidden_dims=%s  history=%d",
+        n_params,
+        frame_feat_dim,
+        gnn_hidden_dims,
+        gru_hidden_dims,
+        history,
+    )
+    logger.info("Inference model architecture:\n%s", model)
 
     threshold = infer_cfg.get("threshold")
     scorer = GNNScorer.from_checkpoint(
@@ -509,16 +576,38 @@ def _build_scorer(cfg: dict, model_type: str, checkpoint: str):
     elif model_type == "gnn":
         from sbn_anomaly.models.gnn_forecaster_pyg import GNNForecasterPyG
 
-        frame_feat_dim = int(model_cfg.get("frame_feat_dim") or model_cfg.get("node_feat_dim") or 5)
+        frame_feat_dim = int(
+            model_cfg.get("frame_feat_dim")
+            or model_cfg.get("node_feat_dim")
+            or 5
+        )
+
+        gnn_hidden_dims = _get_hidden_dims(
+            model_cfg,
+            new_key="gnn_hidden_dims",
+            old_hidden_key="gnn_hidden",
+            old_layers_key="gnn_layers",
+            default_hidden=64,
+            default_layers=2,
+        )
+
+        gru_hidden_dims = _get_hidden_dims(
+            model_cfg,
+            new_key="gru_hidden_dims",
+            old_hidden_key="gru_hidden",
+            old_layers_key="gru_layers",
+            default_hidden=128,
+            default_layers=1,
+        )
+
         model = GNNForecasterPyG(
             frame_feat_dim=frame_feat_dim,
             target_dim=frame_feat_dim,
-            gnn_hidden=int(model_cfg.get("gnn_hidden", 64)),
-            gnn_layers=int(model_cfg.get("gnn_layers", 2)),
-            gru_hidden=int(model_cfg.get("gru_hidden", 128)),
-            gru_layers=int(model_cfg.get("gru_layers", 1)),
+            gnn_hidden_dims=gnn_hidden_dims,
+            gru_hidden_dims=gru_hidden_dims,
             history=int(model_cfg.get("history", 4)),
             dropout=float(model_cfg.get("dropout", 0.1)),
+            norm_type=str(model_cfg.get("norm_type", "none")),
         )
     else:
         raise ValueError(f"Unknown model_type '{model_type}'.")
