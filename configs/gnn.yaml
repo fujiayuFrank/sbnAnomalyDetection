@@ -72,7 +72,7 @@ model:
 training:
   batch_size: 20
   num_workers: 5
-  lr: 0.005
+  lr: 0.001
   weight_decay: 1.0e-4
   max_epochs: 100
   checkpoint_dir: checkpoints/gnn/June-22-test
