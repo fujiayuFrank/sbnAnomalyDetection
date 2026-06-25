@@ -23,8 +23,16 @@ import yaml
 # Default Paths
 # ============================================================
 
+# Main project directory.
 PROJECT_DIR = Path("/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection")
-DEFAULT_CONFIG_DIR = PROJECT_DIR / "tuning_configs"
+
+# Default sweep config directory.
+# The tuning_configs directory contains:
+#   tuning_configs/test_configs/
+#   tuning_configs/gnn_sweep/
+#
+# By default, run the real GNN sweep configs.
+DEFAULT_CONFIG_DIR = PROJECT_DIR / "tuning_configs" / "gnn_sweep"
 
 # Store trained models under the usual checkpoint area.
 DEFAULT_MODEL_ROOT = PROJECT_DIR / "checkpoints" / "gnn"
@@ -32,7 +40,7 @@ DEFAULT_MODEL_ROOT = PROJECT_DIR / "checkpoints" / "gnn"
 # Store each sweep run/model under checkpoints/gnn/<run_name>/
 DEFAULT_RUNS_ROOT = DEFAULT_MODEL_ROOT
 
-# Store database/export summaries directly in sbnAnomalyDetection path.
+# Store database/export summaries directly in the main project directory.
 DEFAULT_DB_PATH = PROJECT_DIR / "gnn_sweep.sqlite3"
 
 # ============================================================
