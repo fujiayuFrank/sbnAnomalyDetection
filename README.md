@@ -87,7 +87,6 @@ sbnAnomalyDetection/
 ├── run_materialize_windows.sh          # Bash wrapper for materializing windows/events
 ├── run_multi_branch_inference.py       # Multi-branch inference runner
 ├── npz_npy_reader.py                   # Inspect .npz/.npy files
-│
 ├── tests/
 ├── graphing/
 │    ├── plot_wrapper.C               # hits2.h.integral histogram plotter
