@@ -149,7 +149,7 @@ sbn-train --config configs/gnn.yaml
 
 ### Running a GNN parameter sweep
 
-The top-level `run_gnn_sweep.py` script is used for batch GNN experiments. It runs a list of YAML configuration files from `tunning_configs/`, so each sweep configuration can keep its own model dimensions, training settings, checkpoint directory, and output paths.
+The top-level `run_gnn_sweep.py` script is used for batch GNN experiments. It runs YAML configuration files from `tuning_configs/` / `tunning_configs/` and gives each config its own run name based on the config filename stem. For example, `tuning_configs/gnn_test2.yaml` becomes run name `gnn_test2`.
 
 Typical usage:
 
@@ -157,14 +157,20 @@ Typical usage:
 python run_gnn_sweep.py
 ```
 
-The current sweep wrapper also handles per-run output management, reruns, inference, and resource monitoring. For each YAML file, the wrapper creates/reuses a run directory under `checkpoints/gnn/<config_stem>/`, writes a patched `config_run.yaml` there, trains the model, then runs inference with the newly saved checkpoint. If a run with the same name already exists in the SQLite database, the wrapper deletes the old database rows and overwrites the run outputs instead of failing with a duplicate-name error.
+For each YAML file, the wrapper creates/reuses a per-run directory under:
+
+```text
+checkpoints/gnn/<config_stem>/
+```
+
+Inside that directory, it writes a patched `config_run.yaml`, trains the model, and then runs inference using the newly saved checkpoint. The SQLite database, CSV summary, and Excel summary are stored in the main project directory by default.
 
 Example:
 
 ```bash
 python run_gnn_sweep.py \
   --config-dir tuning_configs \
-  --pattern "*.yaml" \
+  --pattern "gnn_test*.yaml" \
   --monitor-interval 30
 ```
 
@@ -176,22 +182,70 @@ Useful options:
 | `--pattern` | Glob pattern for selecting configs, e.g. `gnn_test*.yaml`. |
 | `--runs-root` | Root directory for per-model output folders. Default: `checkpoints/gnn/`. |
 | `--db-path` | SQLite summary database path. Default: `gnn_sweep.sqlite3` in the project directory. |
+| `--train-cmd` | Training command. Default: `sbn-train`. Useful if you want `python -m sbn_anomaly.train.cli`. |
+| `--infer-cmd` | Inference command. Default: `sbn-infer`. Useful if you want `python -m sbn_anomaly.infer.cli`. |
+| `--timeout` | Optional timeout in seconds for each train/infer subprocess. Default: no timeout. |
 | `--skip-infer` | Train only; do not run inference after training. |
-| `--stop-on-error` | Stop after the first failed config. |
-| `--monitor-interval N` | Print resource usage every `N` seconds while training or inference is running. Use `0` to disable. |
+| `--stop-on-error` | Stop the sweep after the first failed config. Without this flag, later configs continue running. |
+| `--monitor-interval N` | Print CPU/RAM usage every `N` seconds while training or inference is running. Use `0` to disable. |
+| `--force-rewrite` / `--force_rewrite` | If a run name already exists in the database, delete the old database record and rerun training/inference, overwriting files in that run directory. |
 
-The monitor output is injected directly into the visible terminal stream, so it remains visible even while training progress bars and logging output are being printed. A typical line looks like:
+#### Name-conflict and rerun behavior
+
+The wrapper uses `run_name = <config filename stem>`, so rerunning the same YAML will hit the same database record and the same directory:
+
+```text
+checkpoints/gnn/<run_name>/
+```
+
+By default, the wrapper does **not** overwrite successful existing runs. This avoids accidentally retraining a model that already completed.
+
+Default behavior:
+
+| Existing DB status | Behavior without `--force-rewrite` |
+|--------------------|-------------------------------------|
+| `success` | Skip training/inference and keep the existing model/database record. |
+| `trained_no_infer` | Skip training and keep the existing model/database record. |
+| `failed` | Delete the failed database record and rerun automatically. |
+| `running` | Treat as stale/interrupted only if the script has been configured to include `running` in the auto-rerun statuses. Otherwise it will be skipped unless `--force-rewrite` is used. |
+
+Use forced rewrite when you intentionally want to retrain a model even though a completed record already exists:
+
+```bash
+python run_gnn_sweep.py --force-rewrite
+```
+
+This deletes the old database rows for that `run_name`, then reuses the same output directory. Files with the same names, such as `config_run.yaml`, `gnn_final.pt`, `scores.npz`, `training_history.csv`, and plots, will be overwritten by the new run. The wrapper does not delete the entire directory first, so unrelated old files with different names may remain.
+
+If a training run was interrupted with `Ctrl+C`, its database status may remain `running` because the wrapper did not reach the final status update. In that case, either rerun with:
+
+```bash
+python run_gnn_sweep.py --force-rewrite
+```
+
+or, if you are sure no other sweep process is currently using the same run directory, include `running` in the auto-rerun status list in the conflict logic:
+
+```python
+elif existing_status in {"failed", "running"}:
+```
+
+Do **not** run two copies of the sweep wrapper on the same configs at the same time if `running` is treated as auto-rewritable. A second wrapper process could see the first process's `running` record, delete it, and start another training job writing to the same directory.
+
+#### Resource monitoring and terminal output
+
+The monitor output is injected directly into the visible terminal stream, so it remains visible while training progress bars and logging output are being printed. A typical line looks like:
 
 ```text
 [2026-06-24T20:27:19] during command usage
-  Process tree: 11 process(es) | CPU: 3072.3% over 0.5s sample | RSS: 10.5 GB
+  Process tree: 11 process(es) | CPU: 3072.3% over 0.5s sample | PSS: 8.3 GB | RSS: 10.5 GB
 ```
 
 Interpretation:
 
 * `Process tree` means the wrapper is monitoring the launched `sbn-train` or `sbn-infer` process plus its child processes, such as PyTorch DataLoader workers.
 * `CPU` is sampled over a short window. `100%` means one full CPU core during that sample; `200%` means about two cores; values above `100%` are normal for multi-process or multi-threaded PyTorch jobs.
-* `RSS` is the summed resident memory of the process tree. It is useful for tracking approximate memory use, but it can over-count shared pages between forked workers.
+* `PSS`, when available on Linux, is the better estimate of real memory pressure because it divides shared memory pages among processes.
+* `RSS` is still shown as a useful upper-bound-like number, but summed RSS can over-count shared pages between forked workers.
 
 The monitor interval controls how often the resource block is printed, not the averaging window of the CPU value. For example, `--monitor-interval 30` prints once every 30 seconds, but each CPU value is still a short sample. Use a smaller interval such as `10` for more frequent feedback, or `0` to turn monitoring off:
 
@@ -200,7 +254,16 @@ python run_gnn_sweep.py --monitor-interval 10
 python run_gnn_sweep.py --monitor-interval 0
 ```
 
-Each YAML in `tunning_configs/` should follow the same structure as `configs/gnn.yaml`, including list-style hidden dimensions such as:
+When running through `nohup`, output is usually redirected to a file instead of staying attached to the terminal. Use an explicit log file and watch it with `tail -f`:
+
+```bash
+nohup python run_gnn_sweep.py > gnn_sweep.log 2>&1 &
+tail -f gnn_sweep.log
+```
+
+#### Sweep config format
+
+Each YAML in `tuning_configs/` / `tunning_configs/` should follow the same structure as `configs/gnn.yaml`, including list-style hidden dimensions such as:
 
 ```yaml
 model:
