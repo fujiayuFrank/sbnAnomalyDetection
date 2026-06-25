@@ -19,7 +19,13 @@ OUTPUT_YAML_DIR = Path("tuning_configs/gnn_sweep")
 # Parameter values to sweep
 WINDOW_SIZES = [20, 50, 70, 100]
 STRIDES = [10, 20, 30, 40, 50, 70, 100]
-HISTORIES = [0, 2, 6, 10]
+HISTORIES = [1, 2, 6, 10]
+
+# Default training settings to apply to every generated YAML
+DEFAULT_LR = 0.001
+DEFAULT_WEIGHT_DECAY = 1.0e-4
+DEFAULT_BATCH_SIZE = 64
+DEFAULT_MAX_EPOCHS = 100
 
 # Name prefix for generated runs
 RUN_PREFIX = "gnn_sweep"
@@ -34,7 +40,15 @@ CHECKPOINT_BASE_DIR = Path("checkpoints/gnn")
 
 def load_yaml(path: Path) -> dict:
     with path.open("r") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    if cfg is None:
+        cfg = {}
+
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Base YAML did not load as a dictionary: {path}")
+
+    return cfg
 
 
 def save_yaml(config: dict, path: Path) -> None:
@@ -65,6 +79,12 @@ def make_config(
 ) -> dict:
     cfg = copy.deepcopy(base_config)
 
+    # Make sure required sections exist
+    cfg.setdefault("data", {})
+    cfg.setdefault("model", {})
+    cfg.setdefault("training", {})
+    cfg.setdefault("inference", {})
+
     # Vary data rolling-window settings
     cfg["data"]["window_size"] = window_size
     cfg["data"]["stride"] = stride
@@ -72,6 +92,11 @@ def make_config(
     # Vary model history
     cfg["model"]["history"] = history
 
+    # Apply default training settings
+    cfg["training"]["lr"] = DEFAULT_LR
+    cfg["training"]["weight_decay"] = DEFAULT_WEIGHT_DECAY
+    cfg["training"]["batch_size"] = DEFAULT_BATCH_SIZE
+    cfg["training"]["max_epochs"] = DEFAULT_MAX_EPOCHS
     # Give each run its own checkpoint directory
     checkpoint_dir = CHECKPOINT_BASE_DIR / run_name
 
@@ -97,7 +122,17 @@ def main() -> None:
         if stride > window_size:
             print(
                 f"Skipping invalid combination: "
-                f"window_size={window_size}, stride={stride}, history={history}"
+                f"window_size={window_size}, stride={stride}, history={history} "
+                f"(stride must be <= window_size)"
+            )
+            skipped += 1
+            continue
+
+        if history < 1:
+            print(
+                f"Skipping invalid combination: "
+                f"window_size={window_size}, stride={stride}, history={history} "
+                f"(history must be >= 1 for forecasting)"
             )
             skipped += 1
             continue

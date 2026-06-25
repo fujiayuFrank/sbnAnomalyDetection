@@ -178,7 +178,6 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-
 def get_existing_experiment(
     conn: sqlite3.Connection,
     run_name: str,
@@ -262,6 +261,7 @@ def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
         ids,
     )
     conn.commit()
+
 
 def insert_experiment(
     conn: sqlite3.Connection,
@@ -541,11 +541,16 @@ def run_command(
     cwd: Path,
     timeout: int | None = None,
     monitor_interval: int = 30,
+    batch: bool = False,
 ) -> int:
     """Run command, show its output, and periodically inject resource usage.
 
     The child process output is captured and immediately reprinted by this wrapper.
     This lets the wrapper insert resource logs into the same visible terminal stream.
+
+    If batch=True, the wrapper sets environment variables that downstream
+    training/inference code can use to disable tqdm/progress bars without
+    suppressing normal logging output.
     """
     import selectors
 
@@ -559,6 +564,13 @@ def run_command(
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+
+    if batch:
+        # Tell training/inference code to disable tqdm/progress bars.
+        # Normal logger.info(...) output is not suppressed.
+        env["SBN_BATCH"] = "1"
+        env["TQDM_DISABLE"] = "1"
+        env["DISABLE_TQDM"] = "1"
 
     proc = subprocess.Popen(
         cmd,
@@ -899,6 +911,9 @@ def run_sweep(args: argparse.Namespace) -> int:
     print(f"Number of configs: {len(config_paths)}")
     print(f"Runs root: {runs_root}")
     print(f"Database: {db_path}")
+    print(f"Batch mode: {args.batch}")
+    if args.batch:
+        print("Progress-bar suppression env enabled: SBN_BATCH=1, TQDM_DISABLE=1")
     print("=" * 80)
 
     for idx, config_path in enumerate(config_paths, start=1):
@@ -998,6 +1013,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                 cwd=PROJECT_DIR,
                 timeout=args.timeout,
                 monitor_interval=args.monitor_interval,
+                batch=args.batch,
             )
             if train_returncode != 0:
                 raise RuntimeError(f"Training failed with return code {train_returncode}")
@@ -1012,6 +1028,7 @@ def run_sweep(args: argparse.Namespace) -> int:
                     cwd=PROJECT_DIR,
                     timeout=args.timeout,
                     monitor_interval=args.monitor_interval,
+                    batch=args.batch,
                 )
                 if infer_returncode != 0:
                     raise RuntimeError(f"Inference failed with return code {infer_returncode}")
@@ -1125,6 +1142,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Print CPU/RAM usage every N seconds during train/infer. Set 0 to disable.",
     )
     parser.add_argument(
+        "--batch",
+        action="store_true",
+        help=(
+            "Run in batch/log-file mode. Sets SBN_BATCH=1 and TQDM_DISABLE=1 "
+            "for train/infer subprocesses so progress bars can be suppressed "
+            "while normal logs are still printed."
+        ),
+    )
+    parser.add_argument(
         "--force-rewrite",
         "--force_rewrite",
         dest="force_rewrite",
@@ -1149,7 +1175,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "are not produced."
         ),
     )
-
 
     return parser
 
