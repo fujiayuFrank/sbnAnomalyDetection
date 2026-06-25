@@ -14,8 +14,8 @@ data:
   n_temporal_bins: 4
   stride: 20
 
-  channel_start: 9500
-  channel_end: 10000
+  channel_start: 9600
+  channel_end: 9650
 
   node_features:
     - sum
