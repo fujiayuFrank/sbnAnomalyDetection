@@ -171,11 +171,54 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
 
 
-def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
-    """Delete any existing DB records for this run_name before rerunning.
+def get_existing_experiment(
+    conn: sqlite3.Connection,
+    run_name: str,
+) -> dict[str, Any] | None:
+    """Return the existing DB record for run_name, if one exists."""
+    row = conn.execute(
+        """
+        SELECT
+            id,
+            run_name,
+            config_name,
+            status,
+            run_dir,
+            checkpoint_dir,
+            final_model_path,
+            score_npz_path,
+            start_time,
+            end_time
+        FROM experiments
+        WHERE run_name = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_name,),
+    ).fetchone()
 
-    This makes reruns overwrite the previous database entry instead of failing with:
-        UNIQUE constraint failed: experiments.run_name
+    if row is None:
+        return None
+
+    keys = [
+        "id",
+        "run_name",
+        "config_name",
+        "status",
+        "run_dir",
+        "checkpoint_dir",
+        "final_model_path",
+        "score_npz_path",
+        "start_time",
+        "end_time",
+    ]
+    return dict(zip(keys, row))
+
+
+def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
+    """Delete existing DB records for this run_name before a forced rerun.
+
+    This is only called when --force-rewrite / --force_rewrite is set.
 
     The run directory itself is reused; files like config_run.yaml, gnn_final.pt,
     scores.npz, and plots are overwritten by the new train/infer commands.
@@ -194,7 +237,7 @@ def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
 
     print(
         f"Existing DB record(s) for run_name={run_name!r} found "
-        f"with status={statuses}; overwriting.",
+        f"with status={statuses}; force_rewrite=True, overwriting.",
         flush=True,
     )
 
@@ -413,7 +456,9 @@ def get_process_usage_text(
 
     CPU is sampled over sample_seconds, so 100% means one full CPU core
     during that sample window. Values above 100% mean multiple cores.
-    RSS is summed across the process tree and may over-count shared memory.
+
+    On Linux, PSS avoids most double-counting from shared memory.
+    RSS is still shown as an upper-bound-like number.
     """
     lines = [f"\n[{now_str()}] {label} usage"]
 
@@ -426,30 +471,55 @@ def get_process_usage_text(
         live_processes = []
         for p in processes:
             try:
-                # First call primes psutil's CPU counter for this process object.
                 p.cpu_percent(interval=None)
                 live_processes.append(p)
             except psutil.NoSuchProcess:
                 pass
 
-        # Measure over a real short interval. This avoids the common all-0.0% issue.
         time.sleep(sample_seconds)
 
         total_cpu = 0.0
         total_rss = 0
+        total_pss = 0
+        have_pss = False
+
+        still_live = 0
 
         for p in live_processes:
             try:
+                still_live += 1
                 total_cpu += p.cpu_percent(interval=None)
-                total_rss += p.memory_info().rss
+
+                mem = p.memory_info()
+                total_rss += mem.rss
+
+                # Linux only, requires psutil support and permission to read smaps.
+                try:
+                    full_mem = p.memory_full_info()
+                    pss = getattr(full_mem, "pss", None)
+                    if pss is not None:
+                        total_pss += pss
+                        have_pss = True
+                except Exception:
+                    pass
+
             except psutil.NoSuchProcess:
                 pass
 
-        lines.append(
-            f"  Process tree: {len(live_processes)} process(es) | "
-            f"CPU: {total_cpu:.1f}% over {sample_seconds:.1f}s sample | "
-            f"RSS: {format_bytes(total_rss)}"
-        )
+        if have_pss:
+            lines.append(
+                f"  Process tree: {still_live} process(es) | "
+                f"CPU: {total_cpu:.1f}% over {sample_seconds:.1f}s sample | "
+                f"PSS: {format_bytes(total_pss)} | "
+                f"RSS: {format_bytes(total_rss)}"
+            )
+        else:
+            lines.append(
+                f"  Process tree: {still_live} process(es) | "
+                f"CPU: {total_cpu:.1f}% over {sample_seconds:.1f}s sample | "
+                f"RSS: {format_bytes(total_rss)} "
+                f"(PSS unavailable; RSS may over-count shared memory)"
+            )
 
     except Exception as exc:
         lines.append(f"  Process usage unavailable: {exc}")
@@ -830,9 +900,23 @@ def run_sweep(args: argparse.Namespace) -> int:
         run_name = f"{config_stem}"
         run_dir = runs_root / run_name
 
-        # Always overwrite the previous DB record for the same config/run name.
-        # This prevents SQLite UNIQUE constraint failures when rerunning a YAML.
-        delete_existing_experiment(conn, run_name)
+        existing_experiment = get_existing_experiment(conn, run_name)
+        if existing_experiment is not None and not args.force_rewrite:
+            print("\n" + "=" * 80)
+            print(f"[{idx}/{len(config_paths)}] {config_path}")
+            print(f"Run name conflict: {run_name!r}")
+            print(
+                "force_rewrite=False, so training/inference will be skipped "
+                "and the existing model/database record will be kept."
+            )
+            print(f"Existing status: {existing_experiment.get('status')}")
+            print(f"Existing run directory: {existing_experiment.get('run_dir')}")
+            print(f"Existing final model: {existing_experiment.get('final_model_path')}")
+            print("=" * 80)
+            continue
+
+        if existing_experiment is not None and args.force_rewrite:
+            delete_existing_experiment(conn, run_name)
 
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1007,6 +1091,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=30,
         help="Print CPU/RAM usage every N seconds during train/infer. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--force-rewrite",
+        "--force_rewrite",
+        dest="force_rewrite",
+        action="store_true",
+        help=(
+            "If a config/run name already exists in the database, delete the old "
+            "database record and rerun training/inference, overwriting files in "
+            "that run directory. By default, name conflicts are skipped."
+        ),
     )
 
     return parser
