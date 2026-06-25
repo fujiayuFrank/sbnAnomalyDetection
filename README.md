@@ -187,7 +187,7 @@ Useful options:
 | `--timeout` | Optional timeout in seconds for each train/infer subprocess. Default: no timeout. |
 | `--skip-infer` | Train only; do not run inference after training. |
 | `--stop-on-error` | Stop the sweep after the first failed config. Without this flag, later configs continue running. |
-| `--monitor-interval N` | Print CPU/RAM usage every `N` seconds while training or inference is running. Use `0` to disable. |
+| `--monitor-interval N` / `--monitor_interval N` | Print CPU/RAM usage every `N` seconds while training or inference is running. Use `0` to disable. |
 | `--force-rewrite` / `--force_rewrite` | If a run name already exists in the database, delete the old database record and rerun training/inference, overwriting files in that run directory. |
 
 #### Name-conflict and rerun behavior

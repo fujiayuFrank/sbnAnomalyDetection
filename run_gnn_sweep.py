@@ -1110,6 +1110,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--monitor-interval",
+        "--monitor_interval",
+        dest="monitor_interval",
         type=int,
         default=30,
         help="Print CPU/RAM usage every N seconds during train/infer. Set 0 to disable.",
