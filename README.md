@@ -46,88 +46,60 @@ Past windows (history × window_size events)
 
 ```text
 sbnAnomalyDetection/
-├── sbn_anomaly/                         # Main Python package
-│   ├── data/                            # ROOT streaming and window/event datasets
-│   │   ├── collate.py                   # PyTorch/PyG batch collation helpers
-│   │   ├── dataset.py                   # Map-style datasets for TPC, PMT, fusion, and window models
-│   │   ├── event_joiner.py              # Event/file joining helpers
-│   │   ├── graph_window_dataset.py      # Legacy graph-window dataset utilities
-│   │   ├── graph_window_dataset_pyg.py  # PyG Data/Batch construction and edge-index logic
-│   │   ├── materialize_windows.py       # CLI for sparse events NPZ or legacy dense windows
-│   │   ├── root_files.py                # ROOT file-list/path utilities
-│   │   ├── sparse_window_dataset.py     # SparseWindowDatasetPyG — primary GNN dataset
-│   │   ├── stream_dataset.py            # Streaming TPC dataset for autoencoder workflows
-│   │   └── streaming.py                 # RootStreamer — uproot-based ROOT streaming
-│   ├── models/                          # Model definitions
-│   │   ├── fusion_model.py              # FusionAutoencoder
-│   │   ├── gnn_forecaster.py            # Legacy/non-PyG GNN forecaster
+├── sbn_anomaly/
+│   ├── data/
+│   │   ├── sparse_window_dataset.py     # SparseWindowDatasetPyG — main GNN dataset
+│   │   ├── graph_window_dataset_pyg.py  # PyG Data/Batch construction, edge index
+│   │   ├── streaming.py                 # RootStreamer — uproot-based ROOT streaming
+│   │   ├── materialize_windows.py       # Window/event materialization CLI
+│   │   ├── stream_dataset.py            # TPCStreamDataset for TPC autoencoder
+│   │   └── dataset.py                   # Map-style datasets (TPC, PMT, Fusion, Window)
+│   ├── models/
 │   │   ├── gnn_forecaster_pyg.py        # GNNForecasterPyG — primary sparse PyG model
-│   │   ├── pmt_model.py                 # PMTAutoencoder
+│   │   ├── gnn_forecaster.py            # Dense-adjacency legacy GNNForecaster
 │   │   ├── tpc_model.py                 # TPCAutoencoder
+│   │   ├── pmt_model.py                 # PMTAutoencoder
+│   │   ├── fusion_model.py              # FusionAutoencoder
 │   │   └── window_model.py              # WindowAutoencoder
-│   ├── train/                           # Training entry points and trainer classes
-│   │   ├── ablation.py                  # Ablation/evaluation workflow helpers
+│   ├── train/
 │   │   ├── cli.py                       # sbn-train entry point
-│   │   ├── fusion_trainer.py            # Fusion trainer
 │   │   ├── gnn_trainer.py               # GNNTrainerPyG
-│   │   ├── pmt_trainer.py               # PMT trainer
-│   │   ├── tpc_trainer.py               # TPC trainer
-│   │   ├── trainer.py                   # BaseTrainer shared training logic
-│   │   └── window_trainer.py            # Window trainer
-│   ├── infer/                           # Inference and scoring
+│   │   └── trainer.py                   # BaseTrainer (shared training loop)
+│   ├── infer/
 │   │   ├── cli.py                       # sbn-infer entry point
-│   │   ├── inferrer.py                  # GNNScorer and generic anomaly scorers
-│   │   └── multi_branch.py              # Multi-branch inference support
-│   └── utils/                           # Shared utilities
-│       ├── geometry.py                  # Geometry/channel-position helpers
-│       ├── logging.py                   # Logging setup
-│       ├── metrics.py                   # Metrics helpers
-│       └── plotting.py                  # Common plotting helpers
-├── configs/                             # YAML configs and detector/channel metadata
-│   ├── gnn.yaml                         # Primary GNN configuration
-│   ├── materialize_windows.yaml         # Materialization config
-│   ├── default.yaml
+│   │   └── inferrer.py                  # GNNScorer, AnomalyScorer
+│   └── utils/
+├── configs/
+│   ├── gnn.yaml                         # GNN configuration (primary)
+│   ├── materialize_windows.yaml         # Window/event materialization config
+│   ├── default.yaml                     # Shared/default configuration
 │   ├── tpc.yaml
 │   ├── pmt.yaml
 │   ├── fusion.yaml
 │   ├── window.yaml
-│   ├── SBNDTPCChannelMap_v2.txt
-│   ├── SBNDTPCChannelMap_v2_with_positions.csv
-│   └── sbnd_v02_06.gdml
-├── data/                                # Data manifests / small repository data files
-├── graphing/                            # ROOT/Python plotting and diagnostic scripts
-│   ├── channel_time_plot.C              # Per-channel integral vs. time plotting
-│   ├── inference_result_plotter.py      # Inference-score plotting
-│   ├── materialize_window_plot.py       # Materialized window/event NPZ plotting
-│   ├── plot_channelhist.C/.py           # Channel histogram plotting wrappers
-│   └── plot_wrapper.C/.py               # Hit-integral histogram plotting wrappers
-├── scripts/                             # Shell wrappers for common train/infer jobs
-│   ├── run_inference.sh
-│   ├── train_fusion.sh
-│   ├── train_pmt.sh
-│   ├── train_tpc.sh
-│   └── train_window.sh
-├── tests/                               # Pytest test suite
-│   ├── test_ablation.py
-│   ├── test_data.py
-│   ├── test_infer.py
-│   ├── test_models.py
-│   ├── test_stream_dataset.py
-│   └── test_train.py
-├── tuning_configs/                      # Sweep/tuning YAML configs
-│   └── test_configs/                    # Smaller test sweep configs
-├── GNN_ARCHITECTURE.md                  # GNN architecture notes
-├── GNN_QUICK_REFERENCE.md               # Quick command/config reference
-├── GNN_WORKFLOW.md                      # End-to-end GNN workflow notes
-├── config_maker.py                      # Generates sweep/tuning YAML files
-├── npz_npy_reader.py                    # Utility for inspecting NPZ/NPY files
-├── run_gnn_sweep.py                     # Batch GNN training/inference sweep wrapper
-├── run_materialize_windows.sh           # Materialization shell wrapper
-├── run_multi_branch_inference.py        # Multi-branch inference runner
-├── requirements.txt
-├── requirements-dev.txt
+│   └── ...
+├── tuning_configs/
+│   └── test_configs/
+│       ├── gnn_test1.yaml
+│       └── ...
+├── config_maker.py                     # Generate sweep/tuning YAML configs
+├── run_gnn_sweep.py                    # Run GNN sweep configs and track results
+├── run_materialize_windows.sh          # Bash wrapper for materializing windows/events
+├── run_multi_branch_inference.py       # Multi-branch inference runner
+├── npz_npy_reader.py                   # Inspect .npz/.npy files
+│
+├── tests/
+├── graphing/
+│    ├── plot_wrapper.C               # hits2.h.integral histogram plotter
+│    ├── plot_wrapper.py
+│    ├── materialize_window_plot.py   # materialize_window .npz file plotter
+│    ├── plot_channelhist.C           # hits2.h.channel histogram plotter
+│    ├── plot_channelhist.py
+│    ├── channel_time_plot.C          # per channel integral value with time line chart plotter
+│    └── inference_result_plotter.py  # model inference score histogram plotter
 └── pyproject.toml
 ```
+
 
 ## Installation
 
