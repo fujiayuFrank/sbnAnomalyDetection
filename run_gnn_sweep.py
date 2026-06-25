@@ -901,22 +901,38 @@ def run_sweep(args: argparse.Namespace) -> int:
         run_dir = runs_root / run_name
 
         existing_experiment = get_existing_experiment(conn, run_name)
-        if existing_experiment is not None and not args.force_rewrite:
-            print("\n" + "=" * 80)
-            print(f"[{idx}/{len(config_paths)}] {config_path}")
-            print(f"Run name conflict: {run_name!r}")
-            print(
-                "force_rewrite=False, so training/inference will be skipped "
-                "and the existing model/database record will be kept."
-            )
-            print(f"Existing status: {existing_experiment.get('status')}")
-            print(f"Existing run directory: {existing_experiment.get('run_dir')}")
-            print(f"Existing final model: {existing_experiment.get('final_model_path')}")
-            print("=" * 80)
-            continue
+        existing_status = None
+        if existing_experiment is not None:
+            existing_status = str(existing_experiment.get("status") or "")
 
-        if existing_experiment is not None and args.force_rewrite:
-            delete_existing_experiment(conn, run_name)
+        if existing_experiment is not None:
+            if args.force_rewrite:
+                delete_existing_experiment(conn, run_name)
+            elif existing_status in {"failed", "running"}:
+                print("\n" + "=" * 80)
+                print(f"[{idx}/{len(config_paths)}] {config_path}")
+                print(f"Run name conflict: {run_name!r}")
+                print(
+                    f"Existing record has status={existing_status!r}, so it will be "
+                    "rewritten even though force_rewrite=False."
+                )
+                print(f"Existing run directory: {existing_experiment.get('run_dir')}")
+                print(f"Existing final model: {existing_experiment.get('final_model_path')}")
+                print("=" * 80)
+                delete_existing_experiment(conn, run_name)
+            else:
+                print("\n" + "=" * 80)
+                print(f"[{idx}/{len(config_paths)}] {config_path}")
+                print(f"Run name conflict: {run_name!r}")
+                print(
+                    "force_rewrite=False, so training/inference will be skipped "
+                    "and the existing model/database record will be kept."
+                )
+                print(f"Existing status: {existing_experiment.get('status')}")
+                print(f"Existing run directory: {existing_experiment.get('run_dir')}")
+                print(f"Existing final model: {existing_experiment.get('final_model_path')}")
+                print("=" * 80)
+                continue
 
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1100,7 +1116,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "If a config/run name already exists in the database, delete the old "
             "database record and rerun training/inference, overwriting files in "
-            "that run directory. By default, name conflicts are skipped."
+            "that run directory. By default, successful existing runs are skipped, "
+            "but existing runs with status='failed' are automatically rerun."
         ),
     )
 
