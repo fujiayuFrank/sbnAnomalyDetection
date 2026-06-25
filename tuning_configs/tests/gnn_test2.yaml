@@ -32,10 +32,10 @@ data:
     - meta.evt
 
   # Rolling-window materializer options
-  window_size: 30
-  n_temporal_bins: 6
-  stride: 15
-  adjacency_radius: 6
+  window_size: 20
+  n_temporal_bins: 4
+  stride: 10
+  adjacency_radius: 4
   
   # Per-channel node features computed for each temporal bin
   # Default: [sum, min, max, stdev, count]
@@ -51,18 +51,18 @@ data:
 
 model:
   # Number of past windows used to predict the next window
-  history: 8
+  history: 2
   # Node feature dimension; if omitted, trainer will use windows.shape[-1]
   node_feat_dim: null
   
   # GNN / temporal architecture
   # Variable GNN hidden dimensions.
   # Number of GNN layers = len(gnn_hidden_dims)
-  gnn_hidden_dims: [256, 128, 64]
+  gnn_hidden_dims: [128, 64, 32]
 
   # Variable temporal GRU hidden dimensions.
   # Number of GRU layers = len(gru_hidden_dims)
-  gru_hidden_dims: [256, 128, 64]
+  gru_hidden_dims: [128, 64]
 
   # Input normalization applied to each frame before the GCN stack.
   # Options: "none", "batch" (BatchNorm1d per feature), "layer" (LayerNorm per node)
@@ -70,13 +70,13 @@ model:
   norm_type: batch
 
 training:
-  batch_size: 50
+  batch_size: 20
   num_workers: 5
-  lr: 0.005
+  lr: 0.001
   weight_decay: 1.0e-4
   max_epochs: 100
-  checkpoint_dir: checkpoints/gnn/gnn_test3
-  output_path: checkpoints/gnn/gnn_test3/gnn_final.pt
+  checkpoint_dir: checkpoints/gnn/gnn_test2
+  output_path: checkpoints/gnn/gnn_test2/gnn_final.pt
   log_interval: 50
   validation_split: 0.15
   use_amp: true
@@ -91,8 +91,8 @@ training:
   score_mode: mean
 
 inference:
-  checkpoint_path: checkpoints/gnn/gnn_test3/gnn_final.pt
+  checkpoint_path: checkpoints/gnn/gnn_test2/gnn_final.pt
   input_path: /exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/data/windows_test.npz
-  output_path: checkpoints/gnn/gnn_test3/inference_scores.npz
+  output_path: checkpoints/gnn/gnn_test2/inference_scores.npz
   threshold: null
   max_windows: null  # set to an integer to score only the first N windows

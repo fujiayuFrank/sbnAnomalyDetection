@@ -32,9 +32,9 @@ data:
     - meta.evt
 
   # Rolling-window materializer options
-  window_size: 20
-  n_temporal_bins: 4
-  stride: 10
+  window_size: 100
+  n_temporal_bins: 10
+  stride: 100
   adjacency_radius: 4
   
   # Per-channel node features computed for each temporal bin
@@ -51,7 +51,7 @@ data:
 
 model:
   # Number of past windows used to predict the next window
-  history: 2
+  history: 10
   # Node feature dimension; if omitted, trainer will use windows.shape[-1]
   node_feat_dim: null
   
@@ -70,13 +70,13 @@ model:
   norm_type: batch
 
 training:
-  batch_size: 20
+  batch_size: 64
   num_workers: 5
-  lr: 0.005
+  lr: 0.001
   weight_decay: 1.0e-4
   max_epochs: 100
-  checkpoint_dir: checkpoints/gnn/gnn_test2
-  output_path: checkpoints/gnn/gnn_test2/gnn_final.pt
+  checkpoint_dir: checkpoints/gnn/gnn_test3
+  output_path: checkpoints/gnn/gnn_test3/gnn_final.pt
   log_interval: 50
   validation_split: 0.15
   use_amp: true
@@ -91,8 +91,8 @@ training:
   score_mode: mean
 
 inference:
-  checkpoint_path: checkpoints/gnn/gnn_test2/gnn_final.pt
+  checkpoint_path: checkpoints/gnn/gnn_test3/gnn_final.pt
   input_path: /exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/data/windows_test.npz
-  output_path: checkpoints/gnn/gnn_test2/inference_scores.npz
+  output_path: checkpoints/gnn/gnn_test3/inference_scores.npz
   threshold: null
   max_windows: null  # set to an integer to score only the first N windows
