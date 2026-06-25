@@ -233,6 +233,14 @@ Do **not** run two copies of the sweep wrapper on the same configs at the same t
 
 #### Resource monitoring and terminal output
 
+CSV/XLSX summary export is optional. The sweep always updates the SQLite database at `--db-path`, but it does not write `gnn_sweep_summary.csv` or `gnn_sweep_summary.xlsx` unless explicitly requested:
+
+```bash
+python run_gnn_sweep.py --export-summary
+```
+
+This is useful when running many sweeps because the database remains the source of truth, while CSV/XLSX files can be regenerated only when needed.
+
 The monitor output is injected directly into the visible terminal stream, so it remains visible while training progress bars and logging output are being printed. A typical line looks like:
 
 ```text
@@ -386,7 +394,7 @@ weights/
 
 If `training.save_epoch_checkpoints: false`, these per-epoch weight files are skipped to save disk space. The final model is still saved to `training.output_path`.
 
-For sweep or batch-training workflows, keep each model's full artifacts under its own directory such as `checkpoints/gnn/model1/`, `checkpoints/gnn/model2/`, etc. Shared sweep summaries such as SQLite/CSV/XLSX files can remain in the main project directory.
+For sweep or batch-training workflows, keep each model's full artifacts under its own directory such as `checkpoints/gnn/model1/`, `checkpoints/gnn/model2/`, etc. The SQLite sweep database remains in the main project directory by default. CSV/XLSX summary files are produced only when `--export-summary` is passed.
 
 
 ## GNN Inference

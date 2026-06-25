@@ -1045,7 +1045,13 @@ def run_sweep(args: argparse.Namespace) -> int:
                 print("Stopping because --stop-on-error was set.")
                 break
 
-    export_summary(conn, db_path.parent)
+    if args.export_summary:
+        export_summary(conn, db_path.parent)
+    else:
+        print(
+            "Skipping CSV/XLSX summary export because --export-summary was not set."
+        )
+
     conn.close()
 
     return 0
@@ -1120,6 +1126,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "but existing runs with status='failed' are automatically rerun."
         ),
     )
+    parser.add_argument(
+        "--export-summary",
+        "--export_summary",
+        "--export-csv-xlsx",
+        "--export_csv_xlsx",
+        dest="export_summary",
+        action="store_true",
+        help=(
+            "Write gnn_sweep_summary.csv and gnn_sweep_summary.xlsx after the sweep. "
+            "By default, the SQLite database is updated but CSV/XLSX summary files "
+            "are not produced."
+        ),
+    )
+
 
     return parser
 
