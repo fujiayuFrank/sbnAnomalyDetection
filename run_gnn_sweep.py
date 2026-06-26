@@ -222,10 +222,13 @@ def get_existing_experiment(
     return dict(zip(keys, row))
 
 
-def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
-    """Delete existing DB records for this run_name before a forced rerun.
-
-    This is only called when --force-rewrite / --force_rewrite is set.
+def delete_existing_experiment(
+    conn: sqlite3.Connection,
+    run_name: str,
+    *,
+    reason: str = "force_rewrite=True",
+) -> None:
+    """Delete existing DB records for this run_name before a rerun.
 
     The run directory itself is reused; files like config_run.yaml, gnn_final.pt,
     scores.npz, and plots are overwritten by the new train/infer commands.
@@ -244,7 +247,7 @@ def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
 
     print(
         f"Existing DB record(s) for run_name={run_name!r} found "
-        f"with status={statuses}; force_rewrite=True, overwriting.",
+        f"with status={statuses}; {reason}, overwriting.",
         flush=True,
     )
 
@@ -262,6 +265,27 @@ def delete_existing_experiment(conn: sqlite3.Connection, run_name: str) -> None:
     )
     conn.commit()
 
+
+
+def run_directory_needs_rewrite(run_dir: Path) -> tuple[bool, str]:
+    """Return whether a run directory is missing or only contains one YAML file.
+
+    This supports --missing-rewrite: the database can say a model exists,
+    but if checkpoints/gnn/<run_name>/ is absent or only contains a single
+    YAML config file, the run output is incomplete and should be regenerated.
+    """
+    if not run_dir.exists():
+        return True, f"run directory is missing: {run_dir}"
+
+    if not run_dir.is_dir():
+        return True, f"expected run directory path is not a directory: {run_dir}"
+
+    entries = [p for p in run_dir.iterdir() if not p.name.startswith(".")]
+
+    if len(entries) == 1 and entries[0].is_file() and entries[0].suffix.lower() in {".yaml", ".yml"}:
+        return True, f"run directory only contains one YAML file: {entries[0].name}"
+
+    return False, f"run directory looks non-empty enough: {run_dir}"
 
 def insert_experiment(
     conn: sqlite3.Connection,
@@ -929,8 +953,17 @@ def run_sweep(args: argparse.Namespace) -> int:
             existing_status = str(existing_experiment.get("status") or "")
 
         if existing_experiment is not None:
+            missing_rewrite_needed = False
+            missing_rewrite_reason = ""
+            if args.missing_rewrite:
+                missing_rewrite_needed, missing_rewrite_reason = run_directory_needs_rewrite(run_dir)
+
             if args.force_rewrite:
-                delete_existing_experiment(conn, run_name)
+                delete_existing_experiment(
+                    conn,
+                    run_name,
+                    reason="force_rewrite=True",
+                )
             elif existing_status in {"failed", "running"}:
                 print("\n" + "=" * 80)
                 print(f"[{idx}/{len(config_paths)}] {config_path}")
@@ -940,9 +973,33 @@ def run_sweep(args: argparse.Namespace) -> int:
                     "rewritten even though force_rewrite=False."
                 )
                 print(f"Existing run directory: {existing_experiment.get('run_dir')}")
+                print(f"Expected stem-matched run directory: {run_dir}")
                 print(f"Existing final model: {existing_experiment.get('final_model_path')}")
                 print("=" * 80)
-                delete_existing_experiment(conn, run_name)
+                delete_existing_experiment(
+                    conn,
+                    run_name,
+                    reason=f"existing status={existing_status!r}",
+                )
+            elif missing_rewrite_needed:
+                print("\n" + "=" * 80)
+                print(f"[{idx}/{len(config_paths)}] {config_path}")
+                print(f"Run name conflict: {run_name!r}")
+                print(
+                    "missing_rewrite=True and the stem-matched checkpoint directory "
+                    "is missing or incomplete, so this run will be rewritten."
+                )
+                print(f"Reason: {missing_rewrite_reason}")
+                print(f"Existing status: {existing_experiment.get('status')}")
+                print(f"Existing run directory from DB: {existing_experiment.get('run_dir')}")
+                print(f"Expected stem-matched run directory: {run_dir}")
+                print(f"Existing final model: {existing_experiment.get('final_model_path')}")
+                print("=" * 80)
+                delete_existing_experiment(
+                    conn,
+                    run_name,
+                    reason=f"missing_rewrite=True ({missing_rewrite_reason})",
+                )
             else:
                 print("\n" + "=" * 80)
                 print(f"[{idx}/{len(config_paths)}] {config_path}")
@@ -951,8 +1008,11 @@ def run_sweep(args: argparse.Namespace) -> int:
                     "force_rewrite=False, so training/inference will be skipped "
                     "and the existing model/database record will be kept."
                 )
+                if args.missing_rewrite:
+                    print(f"missing_rewrite check: {missing_rewrite_reason}")
                 print(f"Existing status: {existing_experiment.get('status')}")
-                print(f"Existing run directory: {existing_experiment.get('run_dir')}")
+                print(f"Existing run directory from DB: {existing_experiment.get('run_dir')}")
+                print(f"Expected stem-matched run directory: {run_dir}")
                 print(f"Existing final model: {existing_experiment.get('final_model_path')}")
                 print("=" * 80)
                 continue
@@ -1160,6 +1220,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "database record and rerun training/inference, overwriting files in "
             "that run directory. By default, successful existing runs are skipped, "
             "but existing runs with status='failed' are automatically rerun."
+        ),
+    )
+    parser.add_argument(
+        "--missing-rewrite",
+        "--missing_rewrite",
+        dest="missing_rewrite",
+        action="store_true",
+        help=(
+            "If a config/run name already exists in the database, check whether "
+            "checkpoints/gnn/<config_stem>/ exists and contains more than just one "
+            "YAML file. If that directory is missing, is not a directory, or only "
+            "contains one .yaml/.yml file, delete the old database record and "
+            "rerun that config. Successful existing runs with complete-looking "
+            "directories are still skipped."
         ),
     )
     parser.add_argument(

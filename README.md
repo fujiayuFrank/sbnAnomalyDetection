@@ -193,6 +193,7 @@ Useful options:
 | `--stop-on-error` | Stop the sweep after the first failed config. Without this flag, later configs continue running. |
 | `--monitor-interval N` / `--monitor_interval N` | Print CPU/RAM usage every `N` seconds while training or inference is running. Use `0` to disable. |
 | `--force-rewrite` / `--force_rewrite` | If a run name already exists in the database, delete the old database record and rerun training/inference, overwriting files in that run directory. |
+| `--missing-rewrite` / `--missing_rewrite` | If a successful run already exists in the database but its expected output directory is missing or incomplete, delete the old database record and rerun only that model. |
 
 #### Name-conflict and rerun behavior
 
@@ -202,18 +203,27 @@ The wrapper uses `run_name = <config filename stem>`, so rerunning the same YAML
 checkpoints/gnn/<run_name>/
 ```
 
+For example:
+
+```text
+tuning_configs/test.yaml
+        ↓
+run_name = test
+run_dir  = checkpoints/gnn/test/
+```
+
 By default, the wrapper does **not** overwrite successful existing runs. This avoids accidentally retraining a model that already completed.
 
 Default behavior:
 
-| Existing DB status | Behavior without `--force-rewrite` |
-|--------------------|-------------------------------------|
+| Existing DB status | Behavior without rewrite flags |
+|--------------------|--------------------------------|
 | `success` | Skip training/inference and keep the existing model/database record. |
 | `trained_no_infer` | Skip training and keep the existing model/database record. |
 | `failed` | Delete the failed database record and rerun automatically. |
-| `running` | Treat as stale/interrupted only if the script has been configured to include `running` in the auto-rerun statuses. Otherwise it will be skipped unless `--force-rewrite` is used. |
+| `running` | Delete the stale/interrupted database record and rerun automatically. |
 
-Use forced rewrite when you intentionally want to retrain a model even though a completed record already exists:
+Use forced rewrite when you intentionally want to retrain every selected model even though completed records already exist:
 
 ```bash
 python run_gnn_sweep.py --force-rewrite
@@ -221,19 +231,32 @@ python run_gnn_sweep.py --force-rewrite
 
 This deletes the old database rows for that `run_name`, then reuses the same output directory. Files with the same names, such as `config_run.yaml`, `gnn_final.pt`, `scores.npz`, `training_history.csv`, and plots, will be overwritten by the new run. The wrapper does not delete the entire directory first, so unrelated old files with different names may remain.
 
-If a training run was interrupted with `Ctrl+C`, its database status may remain `running` because the wrapper did not reach the final status update. In that case, either rerun with:
+Use missing rewrite when the database says a model exists, but the corresponding checkpoint directory is missing or clearly incomplete:
 
 ```bash
-python run_gnn_sweep.py --force-rewrite
+python run_gnn_sweep.py --missing-rewrite
 ```
 
-or, if you are sure no other sweep process is currently using the same run directory, include `running` in the auto-rerun status list in the conflict logic:
+With `--missing-rewrite`, the wrapper checks the expected directory:
 
-```python
-elif existing_status in {"failed", "running"}:
+```text
+checkpoints/gnn/<config_stem>/
 ```
 
-Do **not** run two copies of the sweep wrapper on the same configs at the same time if `running` is treated as auto-rewritable. A second wrapper process could see the first process's `running` record, delete it, and start another training job writing to the same directory.
+A model is rerun only when one of these is true:
+
+| Directory check | Behavior with `--missing-rewrite` |
+|-----------------|------------------------------------|
+| `checkpoints/gnn/<config_stem>/` is missing | Delete the old database record and rerun that model. |
+| The path exists but is not a directory | Delete the old database record and rerun that model. |
+| The directory contains only one `.yaml` / `.yml` file | Treat it as incomplete, delete the old database record, and rerun that model. |
+| The directory contains additional artifacts | Keep the existing database record and skip, unless `--force-rewrite` is also passed. |
+
+This is useful after an interrupted or partially failed sweep where SQLite still contains a successful-looking record, but the model folder is missing `gnn_final.pt`, `scores.npz`, plots, or other output files.
+
+`--force-rewrite` has higher priority than `--missing-rewrite`. If both are passed, `--force-rewrite` reruns every selected config with an existing database record, regardless of whether the output directory looks complete.
+
+Do **not** run two copies of the sweep wrapper on the same configs at the same time if `running` records are auto-rewritable. A second wrapper process could see the first process's `running` record, delete it, and start another training job writing to the same directory.
 
 #### Resource monitoring and terminal output
 
@@ -275,7 +298,7 @@ tail -f gnn_sweep.log
 
 ### Evaluating GNN sweep inference results
 
-After a sweep has produced per-model inference outputs, use the top-level `evaluate_gnn_sweep.py` script to compare models with a fixed anomaly threshold. The script scans model directories under:
+After a sweep has produced per-model inference outputs, use the top-level `evaluate_gnn_sweep.py` script to compare models over one or more anomaly thresholds. The script scans model directories under:
 
 ```text
 checkpoints/gnn/<model_name>/inference_scores.npz
@@ -289,7 +312,7 @@ scores_max
 first_run
 ```
 
-The script normalizes `scores` and `scores_max`, applies a threshold in `[0, 1]`, and compares the predicted good/bad window labels against the known run labels:
+The script normalizes `scores` and `scores_max`, applies every threshold listed in `THRESHOLDS`, and compares the predicted good/bad window labels against the known run labels:
 
 ```python
 good_runs = {18445, 19724, 20141, 20142, 20144}
@@ -314,7 +337,7 @@ threshold_evaluation/threshold_metrics_summary.csv
 with the columns:
 
 ```text
-model_name, method, normalization_model, TP, TN, FP, FN, precision, recall, F1, accuracy
+model_name, method, threshold, normalization_model, TP, TN, FP, FN, precision, recall, F1, accuracy
 ```
 
 Typical usage:
@@ -322,6 +345,48 @@ Typical usage:
 ```bash
 python evaluate_gnn_sweep.py
 ```
+
+#### Multiple threshold evaluation
+
+The threshold is configured as a list in the script:
+
+```python
+THRESHOLDS = [0.5]
+```
+
+To evaluate several thresholds in one pass, edit it to something like:
+
+```python
+THRESHOLDS = [0.5, 0.3, 0.7]
+```
+
+The script produces one metrics row for each model, method, and threshold combination. By default, rows are written in **model-first** order:
+
+```text
+model_A, threshold 0.5
+model_A, threshold 0.3
+model_A, threshold 0.7
+model_B, threshold 0.5
+model_B, threshold 0.3
+model_B, threshold 0.7
+```
+
+Use `--threshold-first` to write rows in **threshold-first** order instead:
+
+```bash
+python evaluate_gnn_sweep.py --threshold-first
+```
+
+This produces output ordered like:
+
+```text
+threshold 0.5, model_A
+threshold 0.5, model_B
+threshold 0.3, model_A
+threshold 0.3, model_B
+```
+
+This only controls CSV row order. It does not change the computed metrics. If a ranking flag is also passed, ranking overrides the model-first or threshold-first order.
 
 By default, all three evaluation methods are included:
 
@@ -351,9 +416,11 @@ threshold_evaluation/threshold_metrics_full_summary.csv
 threshold_evaluation/threshold_per_run_ratios.csv
 ```
 
+The full summary contains the same model/method/threshold combinations as the compact summary, plus normalization scales, evaluated-window counts, and true-class prediction ratios. The per-run ratio CSV also includes the threshold column so each run-level breakdown is tied to the threshold that produced it.
+
 #### Ranking evaluation output
 
-By default, the compact CSV follows the normal model scan/order sequence. To sort the output by a metric instead, pass one ranking flag:
+By default, the compact CSV follows the normal model-first order, or threshold-first order when `--threshold-first` is used. To sort the output by a metric instead, pass one ranking flag:
 
 ```bash
 python evaluate_gnn_sweep.py --precision-rank
@@ -362,13 +429,13 @@ python evaluate_gnn_sweep.py --f1-rank
 python evaluate_gnn_sweep.py --accuracy-rank
 ```
 
-Ranking flags are mutually exclusive. Each ranking sorts from highest value to lowest value. For example:
+Ranking flags are mutually exclusive. Each ranking sorts from highest value to lowest value across all produced rows. For example, if `THRESHOLDS = [0.5, 0.3]`, then:
 
 ```bash
 python evaluate_gnn_sweep.py --scores-only --f1-rank
 ```
 
-evaluates only the `scores_only` method and writes `threshold_metrics_summary.csv` ranked by F1 score. If `--full-summary` is also given, the full summary CSV is ranked the same way. The per-run ratio CSV is still written in model/run order because it is mainly for debugging.
+evaluates only the `scores_only` method and ranks all `model × threshold` rows by F1 score. If `--full-summary` is also given, the full summary CSV is ranked the same way. The per-run ratio CSV is still written in model/run/threshold order because it is mainly for debugging.
 
 Available command-line flags for `evaluate_gnn_sweep.py`:
 
@@ -377,6 +444,7 @@ Available command-line flags for `evaluate_gnn_sweep.py`:
 | `--full-summary` | Also write `threshold_metrics_full_summary.csv` and `threshold_per_run_ratios.csv`. Without this flag, only the compact summary CSV is written. |
 | `--scores-only` | Only evaluate and store the `scores_only` method. Mutually exclusive with `--scores-max-only`. |
 | `--scores-max-only` | Only evaluate and store the `scores_max_only` method. Mutually exclusive with `--scores-only`. |
+| `--threshold-first` | Write rows by threshold first, then model. Without this flag, rows are written by model first, then threshold. Ranking flags override this order. |
 | `--precision-rank` | Rank CSV output by precision, highest first. |
 | `--recall-rank` | Rank CSV output by recall, highest first. |
 | `--f1-rank` | Rank CSV output by F1 score, highest first. |
@@ -385,10 +453,13 @@ Available command-line flags for `evaluate_gnn_sweep.py`:
 Example combinations:
 
 ```bash
-# Default: all methods, normal order
+# Default: all methods, all thresholds, model-first order
 python evaluate_gnn_sweep.py
 
-# All methods, compact CSV ranked by F1
+# All methods, all thresholds, threshold-first order
+python evaluate_gnn_sweep.py --threshold-first
+
+# All methods, compact CSV ranked by F1 across all model/threshold rows
 python evaluate_gnn_sweep.py --f1-rank
 
 # Only scores_max, compact CSV ranked by recall
@@ -405,7 +476,7 @@ Important top-level settings in the script:
 | `NORMALIZATION_MODE` | Score transform: `tanh`, `sigmoid`, `global_max`, or `none` |
 | `NORMALIZATION_SCOPE` | Use per-model or global normalization scale |
 | `NORMALIZATION_SCALE_MODE` | Use max, percentile, or manual scale |
-| `THRESHOLD` | Anomaly threshold after normalization, in `[0, 1]` |
+| `THRESHOLDS` | List of anomaly thresholds after normalization, each in `[0, 1]` |
 | `BOTH_RULE` | How to combine `scores` and `scores_max`: `or`, `and`, `mean`, or `max` |
 
 #### Sweep config format

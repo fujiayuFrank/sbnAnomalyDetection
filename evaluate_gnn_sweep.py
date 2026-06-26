@@ -413,6 +413,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--full-summary",
+        "--full_summary",
         action="store_true",
         help=(
             "Also write the full detailed CSV files. By default, only a compact "
@@ -421,6 +422,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--threshold-first",
+        "--threshold_first",
         action="store_true",
         help=(
             "Change the unranked CSV row order. By default, the script writes all "
@@ -433,6 +435,7 @@ def parse_args() -> argparse.Namespace:
     method_group = parser.add_mutually_exclusive_group()
     method_group.add_argument(
         "--scores-only",
+        "--scores_only",
         action="store_true",
         help=(
             "Only evaluate and store the scores_only method. "
@@ -441,6 +444,7 @@ def parse_args() -> argparse.Namespace:
     )
     method_group.add_argument(
         "--scores-max-only",
+        "--scores_max_only",
         action="store_true",
         help=(
             "Only evaluate and store the scores_max_only method. "
@@ -451,21 +455,25 @@ def parse_args() -> argparse.Namespace:
     rank_group = parser.add_mutually_exclusive_group()
     rank_group.add_argument(
         "--precision-rank",
+        "--precision_rank",
         action="store_true",
         help="Sort output CSV rows by precision from high to low.",
     )
     rank_group.add_argument(
         "--recall-rank",
+        "--recall_rank",
         action="store_true",
         help="Sort output CSV rows by recall from high to low.",
     )
     rank_group.add_argument(
         "--f1-rank",
+        "--f1_rank",
         action="store_true",
         help="Sort output CSV rows by F1 from high to low.",
     )
     rank_group.add_argument(
         "--accuracy-rank",
+        "--accuracy_rank",
         action="store_true",
         help="Sort output CSV rows by accuracy from high to low.",
     )
