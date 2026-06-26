@@ -93,11 +93,12 @@ sbnAnomalyDetection/
 │    ├── plot_sweep_metrics.py          # Plot threshold_metrics_summary.csv sweep metrics
 │    ├── plot_wrapper.C                 # hits2.h.integral histogram plotter
 │    ├── plot_wrapper.py
-│    ├── materialize_window_plot.py     # materialize_window .npz file plotter
+│    ├── plot_materialize_window.py     # materialize_window .npz file plotter
 │    ├── plot_channelhist.C             # hits2.h.channel histogram plotter
 │    ├── plot_channelhist.py
-│    ├── channel_time_plot.C            # per channel integral value with time line chart plotter
-│    └── inference_result_plotter.py    # model inference score histogram plotter
+│    ├── plot_channel_time.C            # per channel integral value with time line chart plotter
+│    ├── plot_inference_result.py       # model inference score histogram plotter
+│    └── plot_sweep_metrics.py          # Plot the performance of the models in gnn sweep 
 └── pyproject.toml
 ```
 
