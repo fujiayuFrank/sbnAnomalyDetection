@@ -22,7 +22,7 @@ STRIDES = [10, 20, 30, 40, 50, 70, 100]
 HISTORIES = [1, 2, 6, 10]
 
 # Default training settings to apply to every generated YAML
-DEFAULT_LR = 0.001
+DEFAULT_LR = 0.003
 DEFAULT_WEIGHT_DECAY = 1.0e-4
 DEFAULT_BATCH_SIZE = 64
 DEFAULT_MAX_EPOCHS = 100
