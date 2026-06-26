@@ -331,7 +331,7 @@ By default, all three evaluation methods are included:
 | `scores_max_only` | Use only the normalized `scores_max` array |
 | `both_or` | Predict bad if either `scores` or `scores_max` is above threshold |
 
-To export only one score mode:
+To export only one score mode, use one of the mutually exclusive method-selection flags:
 
 ```bash
 python evaluate_gnn_sweep.py --scores-only
@@ -349,6 +349,53 @@ This additionally writes:
 ```text
 threshold_evaluation/threshold_metrics_full_summary.csv
 threshold_evaluation/threshold_per_run_ratios.csv
+```
+
+#### Ranking evaluation output
+
+By default, the compact CSV follows the normal model scan/order sequence. To sort the output by a metric instead, pass one ranking flag:
+
+```bash
+python evaluate_gnn_sweep.py --precision-rank
+python evaluate_gnn_sweep.py --recall-rank
+python evaluate_gnn_sweep.py --f1-rank
+python evaluate_gnn_sweep.py --accuracy-rank
+```
+
+Ranking flags are mutually exclusive. Each ranking sorts from highest value to lowest value. For example:
+
+```bash
+python evaluate_gnn_sweep.py --scores-only --f1-rank
+```
+
+evaluates only the `scores_only` method and writes `threshold_metrics_summary.csv` ranked by F1 score. If `--full-summary` is also given, the full summary CSV is ranked the same way. The per-run ratio CSV is still written in model/run order because it is mainly for debugging.
+
+Available command-line flags for `evaluate_gnn_sweep.py`:
+
+| Flag | Meaning |
+|------|---------|
+| `--full-summary` | Also write `threshold_metrics_full_summary.csv` and `threshold_per_run_ratios.csv`. Without this flag, only the compact summary CSV is written. |
+| `--scores-only` | Only evaluate and store the `scores_only` method. Mutually exclusive with `--scores-max-only`. |
+| `--scores-max-only` | Only evaluate and store the `scores_max_only` method. Mutually exclusive with `--scores-only`. |
+| `--precision-rank` | Rank CSV output by precision, highest first. |
+| `--recall-rank` | Rank CSV output by recall, highest first. |
+| `--f1-rank` | Rank CSV output by F1 score, highest first. |
+| `--accuracy-rank` | Rank CSV output by accuracy, highest first. |
+
+Example combinations:
+
+```bash
+# Default: all methods, normal order
+python evaluate_gnn_sweep.py
+
+# All methods, compact CSV ranked by F1
+python evaluate_gnn_sweep.py --f1-rank
+
+# Only scores_max, compact CSV ranked by recall
+python evaluate_gnn_sweep.py --scores-max-only --recall-rank
+
+# All methods, compact and full summaries ranked by accuracy
+python evaluate_gnn_sweep.py --full-summary --accuracy-rank
 ```
 
 Important top-level settings in the script:

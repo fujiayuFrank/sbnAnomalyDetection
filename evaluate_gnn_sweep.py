@@ -19,6 +19,49 @@ For every model directory, this script:
   5. writes a compact per-model metrics CSV by default
   6. writes detailed full/per-run CSV files only with --full-summary
   7. optionally restricts output to scores-only or scores_max-only with CLI flags
+  8. optionally ranks CSV output by precision, recall, F1, or accuracy
+
+Available command-line flags:
+
+    --full-summary
+        Also write the full detailed summary CSV and the per-run ratio CSV.
+        Without this flag, only the compact summary CSV is written.
+
+    --scores-only
+        Only evaluate and store the scores_only method.
+
+    --scores-max-only
+        Only evaluate and store the scores_max_only method.
+
+    --precision-rank
+        Sort the output CSV rows by precision from highest to lowest.
+
+    --recall-rank
+        Sort the output CSV rows by recall from highest to lowest.
+
+    --f1-rank
+        Sort the output CSV rows by F1 score from highest to lowest.
+
+    --accuracy-rank
+        Sort the output CSV rows by accuracy from highest to lowest.
+
+Notes:
+  - --scores-only and --scores-max-only are mutually exclusive.
+  - The rank flags are mutually exclusive.
+  - If no method-selection flag is given, the script evaluates:
+        scores_only
+        scores_max_only
+        both_<BOTH_RULE>
+  - If no rank flag is given, rows are written in the normal scan/order sequence.
+
+Example usage:
+
+    python evaluate_gnn_sweep.py
+    python evaluate_gnn_sweep.py --full-summary
+    python evaluate_gnn_sweep.py --scores-only
+    python evaluate_gnn_sweep.py --scores-max-only
+    python evaluate_gnn_sweep.py --scores-only --f1-rank
+    python evaluate_gnn_sweep.py --full-summary --accuracy-rank
 
 Definitions:
   - true bad window: first_run is in bad_runs
@@ -386,7 +429,63 @@ def parse_args() -> argparse.Namespace:
             "If neither --scores-only nor --scores-max-only is given, all methods are evaluated."
         ),
     )
+
+    rank_group = parser.add_mutually_exclusive_group()
+    rank_group.add_argument(
+        "--precision-rank",
+        action="store_true",
+        help="Sort output CSV rows by precision from high to low.",
+    )
+    rank_group.add_argument(
+        "--recall-rank",
+        action="store_true",
+        help="Sort output CSV rows by recall from high to low.",
+    )
+    rank_group.add_argument(
+        "--f1-rank",
+        action="store_true",
+        help="Sort output CSV rows by F1 from high to low.",
+    )
+    rank_group.add_argument(
+        "--accuracy-rank",
+        action="store_true",
+        help="Sort output CSV rows by accuracy from high to low.",
+    )
     return parser.parse_args()
+
+
+
+def selected_rank_metric(args: argparse.Namespace) -> str | None:
+    """Return the requested ranking metric, or None for original processing order."""
+    if args.precision_rank:
+        return "precision"
+    if args.recall_rank:
+        return "recall"
+    if args.f1_rank:
+        return "F1"
+    if args.accuracy_rank:
+        return "accuracy"
+    return None
+
+
+def sort_rows_by_metric(rows: list[dict], metric: str | None) -> list[dict]:
+    """Sort rows by a metric descending, keeping NaN/invalid values at the bottom."""
+    if metric is None:
+        return rows
+
+    def sort_key(row: dict) -> tuple[int, float, str, str]:
+        value = row.get(metric, math.nan)
+        try:
+            value_float = float(value)
+        except (TypeError, ValueError):
+            value_float = math.nan
+
+        # invalid_flag=0 for finite values, 1 for NaN/invalid values.
+        invalid_flag = 0 if np.isfinite(value_float) else 1
+        sortable_value = -value_float if invalid_flag == 0 else 0.0
+        return (invalid_flag, sortable_value, str(row.get("method", "")), str(row.get("model_name", "")))
+
+    return sorted(rows, key=sort_key)
 
 
 def main() -> int:
@@ -413,8 +512,11 @@ def main() -> int:
     else:
         method_selection = "all: scores_only, scores_max_only, both"
 
+    rank_metric = selected_rank_metric(args)
+
     print(f"BOTH_RULE                 = {BOTH_RULE}")
     print(f"METHOD_SELECTION          = {method_selection}")
+    print(f"RANK_METRIC               = {rank_metric if rank_metric is not None else 'none'}")
     print("=" * 80)
 
     loaded = {}
@@ -633,6 +735,12 @@ def main() -> int:
             "accuracy": row["accuracy"],
         })
 
+    # If requested, rank the model/method rows by the selected metric.
+    # This affects the compact CSV and the full summary CSV. The per-run CSV is
+    # left grouped by model/run because it is mainly for debugging.
+    compact_rows = sort_rows_by_metric(compact_rows, rank_metric)
+    summary_rows_for_output = sort_rows_by_metric(summary_rows, rank_metric)
+
     compact_summary_csv = OUTPUT_DIR / "threshold_metrics_summary.csv"
     write_csv(compact_summary_csv, compact_rows, compact_summary_fields)
 
@@ -640,12 +748,14 @@ def main() -> int:
     run_csv = OUTPUT_DIR / "threshold_per_run_ratios.csv"
 
     if args.full_summary:
-        write_csv(full_summary_csv, summary_rows, full_summary_fields)
+        write_csv(full_summary_csv, summary_rows_for_output, full_summary_fields)
         write_csv(run_csv, run_rows, run_fields)
 
     # Also print the best models by F1 for each method.
     print("\n" + "=" * 80)
     print(f"Saved compact summary CSV: {compact_summary_csv}")
+    if rank_metric is not None:
+        print(f"CSV model/method rows ranked by {rank_metric} from high to low")
     if args.full_summary:
         print(f"Saved full summary CSV: {full_summary_csv}")
         print(f"Saved per-run CSV: {run_csv}")
