@@ -90,6 +90,7 @@ sbnAnomalyDetection/
 ├── npz_npy_reader.py                   # Inspect .npz/.npy files
 ├── tests/
 ├── graphing/
+│    ├── plot_sweep_metrics.py          # Plot threshold_metrics_summary.csv sweep metrics
 │    ├── plot_wrapper.C                 # hits2.h.integral histogram plotter
 │    ├── plot_wrapper.py
 │    ├── materialize_window_plot.py     # materialize_window .npz file plotter
@@ -437,11 +438,138 @@ python evaluate_gnn_sweep.py --scores-only --f1-rank
 
 evaluates only the `scores_only` method and ranks all `model × threshold` rows by F1 score. If `--full-summary` is also given, the full summary CSV is ranked the same way. The per-run ratio CSV is still written in model/run/threshold order because it is mainly for debugging.
 
+#### Automatic plotting after evaluation
+
+The evaluator can also run the plotting script automatically after it writes the compact summary CSV. This is controlled by `--with-plot`:
+
+```bash
+python evaluate_gnn_sweep.py --with-plot
+```
+
+This first writes:
+
+```text
+threshold_evaluation/threshold_metrics_summary.csv
+```
+
+and then runs the plotting script under the `graphing/` directory. The plotting script path is configured inside `evaluate_gnn_sweep.py` with:
+
+```python
+PLOT_SCRIPT_RELATIVE = Path("graphing/plot_sweep_metrics.py")
+```
+
+The path is relative to the directory containing `evaluate_gnn_sweep.py`. If the plotting script is renamed or moved, update only `PLOT_SCRIPT_RELATIVE`.
+
+The evaluator forwards only the plotting-relevant flags to the plotting script:
+
+| Evaluator flag | Used by evaluator | Forwarded to plotter | Reason |
+|---------------|-------------------|----------------------|--------|
+| `--scores-only` | Yes | Yes | Keeps evaluation and plotting restricted to `scores_only`. |
+| `--scores-max-only` | Yes | Yes | Keeps evaluation and plotting restricted to `scores_max_only`. |
+| `--plot-summary` | No | Yes, when `--with-plot` is used | Asks the plotter to save its own CSV summary files. |
+| `--full-summary` | Yes | No | Writes evaluator full/per-run CSV files; does not control plotting CSV output. |
+| Ranking flags | Yes | No | Ranking only changes CSV row order; plots regroup the rows anyway. |
+| `--threshold-first` | Yes | No | This only changes CSV row order and does not affect plot contents. |
+| `--with-plot` | Yes | No | This only tells the evaluator to launch the plotter. |
+
+Examples:
+
+```bash
+# Evaluate normally, then plot the compact summary
+python evaluate_gnn_sweep.py --with-plot
+
+# Evaluate and plot only the scores_only method
+python evaluate_gnn_sweep.py --scores-only --with-plot
+
+# Write evaluator full summaries and also make plots
+python evaluate_gnn_sweep.py --full-summary --with-plot
+
+# Ask the plotter to also save its own plotting-side CSV summaries
+python evaluate_gnn_sweep.py --with-plot --plot-summary
+
+# Full evaluator summaries plus plotting-side summaries
+python evaluate_gnn_sweep.py --full-summary --with-plot --plot-summary
+```
+
+`--full-summary` and `--plot-summary` are intentionally separate. `--full-summary` belongs to the evaluator and writes `threshold_metrics_full_summary.csv` plus `threshold_per_run_ratios.csv`. `--plot-summary` belongs to the plotting step and writes the plotter's parsed/aggregated CSV outputs.
+
+#### Plotting threshold metrics directly
+
+You can also run the plotting script directly after `threshold_metrics_summary.csv` exists:
+
+```bash
+python graphing/plot_sweep_metrics.py
+```
+
+The plotting script uses internal path settings by default. Its input path should point to:
+
+```python
+INPUT_PATH = Path("threshold_evaluation/threshold_metrics_summary.csv")
+```
+
+The plotter creates a compact set of plots instead of the older heatmap-heavy output:
+
+```text
+plots/
+  01_metric_histograms/
+    accuracy_histogram.png
+    precision_histogram.png
+    recall_histogram.png
+    F1_histogram.png
+
+  02_metric_relations/
+    accuracy/
+      vary_window_size/
+      vary_window_stride/
+      vary_history/
+    precision/
+    recall/
+    F1/
+```
+
+For each metric, it first plots a histogram over all filtered rows. Then it fixes two model variables and plots the metric against the third variable. The three model variables parsed from `model_name` are:
+
+```text
+window_size
+window_stride
+history
+```
+
+The histogram binning is controlled inside `graphing/plot_sweep_metrics.py` with:
+
+```python
+HIST_BINS = 30
+```
+
+The relation plots use automatic y-axis zooming by default so small metric differences do not appear flat:
+
+```python
+AUTO_YLIM = True
+Y_PAD_FRACTION = 0.10
+Y_MIN_PAD = 1e-4
+```
+
+By default, the plotting script saves only plot images. It writes CSV summary files only when `--plot-summary` is passed:
+
+```bash
+python graphing/plot_sweep_metrics.py --plot-summary
+```
+
+Available plotting flags:
+
+| Flag | Meaning |
+|------|---------|
+| `--scores-only` | Plot only rows with `method == scores_only`. |
+| `--scores-max-only` | Plot only rows with `method == scores_max_only`. |
+| `--plot-summary` | Also save plotter-side CSV summaries. Without this flag, only plots are saved. |
+
 Available command-line flags for `evaluate_gnn_sweep.py`:
 
 | Flag | Meaning |
 |------|---------|
 | `--full-summary` | Also write `threshold_metrics_full_summary.csv` and `threshold_per_run_ratios.csv`. Without this flag, only the compact summary CSV is written. |
+| `--with-plot` | After writing the compact summary CSV, run `graphing/plot_sweep_metrics.py` automatically. |
+| `--plot-summary` | Only meaningful with `--with-plot`; forwards `--plot-summary` to the plotting script so it also writes plotter-side CSV summaries. |
 | `--scores-only` | Only evaluate and store the `scores_only` method. Mutually exclusive with `--scores-max-only`. |
 | `--scores-max-only` | Only evaluate and store the `scores_max_only` method. Mutually exclusive with `--scores-only`. |
 | `--threshold-first` | Write rows by threshold first, then model. Without this flag, rows are written by model first, then threshold. Ranking flags override this order. |
@@ -467,6 +595,15 @@ python evaluate_gnn_sweep.py --scores-max-only --recall-rank
 
 # All methods, compact and full summaries ranked by accuracy
 python evaluate_gnn_sweep.py --full-summary --accuracy-rank
+
+# Evaluate and plot automatically
+python evaluate_gnn_sweep.py --with-plot
+
+# Evaluate only scores_only and plot only scores_only
+python evaluate_gnn_sweep.py --scores-only --with-plot
+
+# Generate evaluator full summaries and plotter-side summaries
+python evaluate_gnn_sweep.py --full-summary --with-plot --plot-summary
 ```
 
 Important top-level settings in the script:
@@ -478,6 +615,7 @@ Important top-level settings in the script:
 | `NORMALIZATION_SCALE_MODE` | Use max, percentile, or manual scale |
 | `THRESHOLDS` | List of anomaly thresholds after normalization, each in `[0, 1]` |
 | `BOTH_RULE` | How to combine `scores` and `scores_max`: `or`, `and`, `mean`, or `max` |
+| `PLOT_SCRIPT_RELATIVE` | Plotting script path used by `--with-plot`, relative to `evaluate_gnn_sweep.py` |
 
 #### Sweep config format
 
