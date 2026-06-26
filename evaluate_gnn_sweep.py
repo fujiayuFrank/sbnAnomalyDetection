@@ -14,12 +14,13 @@ Each NPZ should contain at least:
 For every model directory, this script:
   1. reads inference_scores.npz
   2. normalizes scores and scores_max with tanh or sigmoid
-  3. applies a threshold in [0, 1]
+  3. applies each threshold in THRESHOLDS, where each threshold is in [0, 1]
   4. evaluates window-level predictions against known good/bad run labels
   5. writes a compact per-model metrics CSV by default
   6. writes detailed full/per-run CSV files only with --full-summary
   7. optionally restricts output to scores-only or scores_max-only with CLI flags
   8. optionally ranks CSV output by precision, recall, F1, or accuracy
+  9. optionally changes output sequence with --threshold-first
 
 Available command-line flags:
 
@@ -45,6 +46,11 @@ Available command-line flags:
     --accuracy-rank
         Sort the output CSV rows by accuracy from highest to lowest.
 
+    --threshold-first
+        Change the unranked output order. By default, the script evaluates all
+        thresholds for one model before moving to the next model. With this flag,
+        it evaluates all models for one threshold before moving to the next threshold.
+
 Notes:
   - --scores-only and --scores-max-only are mutually exclusive.
   - The rank flags are mutually exclusive.
@@ -52,7 +58,8 @@ Notes:
         scores_only
         scores_max_only
         both_<BOTH_RULE>
-  - If no rank flag is given, rows are written in the normal scan/order sequence.
+  - If no rank flag is given, rows are written in the selected scan/order sequence.
+  - --threshold-first only changes row order when no rank flag is used.
 
 Example usage:
 
@@ -62,6 +69,7 @@ Example usage:
     python evaluate_gnn_sweep.py --scores-max-only
     python evaluate_gnn_sweep.py --scores-only --f1-rank
     python evaluate_gnn_sweep.py --full-summary --accuracy-rank
+    python evaluate_gnn_sweep.py --threshold-first
 
 Definitions:
   - true bad window: first_run is in bad_runs
@@ -120,9 +128,10 @@ MANUAL_SCORE_MAX_SCALE = 1.0
 # This keeps the threshold range exactly meaningful as [0, 1].
 RESCALE_TRANSFORM_TO_UNIT_MAX = True
 
-# Classification threshold after normalization.
-# predicted bad if normalized value > THRESHOLD by default.
-THRESHOLD = 0.5
+# Classification thresholds after normalization.
+# predicted bad if normalized value > threshold by default.
+# The script evaluates every model at every threshold in this list.
+THRESHOLDS = [0.5, 0.7]
 
 # What to do with values exactly equal to the threshold.
 # False: value == threshold is predicted good.
@@ -398,7 +407,6 @@ def write_csv(path: Path, rows: list[dict], fieldnames: Iterable[str]) -> None:
             writer.writerow(row)
 
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate checkpoints/gnn/*/inference_scores.npz with threshold-based good/bad prediction."
@@ -409,6 +417,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Also write the full detailed CSV files. By default, only a compact "
             "summary CSV is written."
+        ),
+    )
+    parser.add_argument(
+        "--threshold-first",
+        action="store_true",
+        help=(
+            "Change the unranked CSV row order. By default, the script writes all "
+            "thresholds for one model before moving to the next model. With this flag, "
+            "it writes all models for one threshold before moving to the next threshold. "
+            "If a rank flag is used, ranking overrides this order."
         ),
     )
 
@@ -454,7 +472,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-
 def selected_rank_metric(args: argparse.Namespace) -> str | None:
     """Return the requested ranking metric, or None for original processing order."""
     if args.precision_rank:
@@ -473,26 +490,241 @@ def sort_rows_by_metric(rows: list[dict], metric: str | None) -> list[dict]:
     if metric is None:
         return rows
 
-    def sort_key(row: dict) -> tuple[int, float, str, str]:
+    def sort_key(row: dict) -> tuple[int, float, str, float, str]:
         value = row.get(metric, math.nan)
         try:
             value_float = float(value)
         except (TypeError, ValueError):
             value_float = math.nan
 
-        # invalid_flag=0 for finite values, 1 for NaN/invalid values.
         invalid_flag = 0 if np.isfinite(value_float) else 1
         sortable_value = -value_float if invalid_flag == 0 else 0.0
-        return (invalid_flag, sortable_value, str(row.get("method", "")), str(row.get("model_name", "")))
+
+        threshold = row.get("threshold", math.nan)
+        try:
+            threshold_float = float(threshold)
+        except (TypeError, ValueError):
+            threshold_float = math.nan
+
+        return (
+            invalid_flag,
+            sortable_value,
+            str(row.get("method", "")),
+            threshold_float if np.isfinite(threshold_float) else math.inf,
+            str(row.get("model_name", "")),
+        )
 
     return sorted(rows, key=sort_key)
 
 
+def get_thresholds() -> list[float]:
+    """Return the user-configured thresholds as a validated float list."""
+    try:
+        thresholds = list(THRESHOLDS)
+    except TypeError:
+        thresholds = [THRESHOLDS]
+
+    if len(thresholds) == 0:
+        raise ValueError("THRESHOLDS must contain at least one threshold")
+
+    thresholds = [float(t) for t in thresholds]
+    for threshold in thresholds:
+        if not (0.0 <= threshold <= 1.0):
+            raise ValueError(f"Every threshold in THRESHOLDS must be between 0 and 1; got {threshold}")
+
+    return thresholds
+
+
+def build_evaluations_for_threshold(
+    *,
+    norm_scores: np.ndarray,
+    norm_scores_max: np.ndarray,
+    threshold: float,
+    args: argparse.Namespace,
+) -> dict[str, np.ndarray]:
+    """Build selected prediction masks for one threshold."""
+    pred_score_bad = predict_bad(norm_scores, threshold, equal_is_bad=equal_is_bad)
+    pred_score_max_bad = predict_bad(norm_scores_max, threshold, equal_is_bad=equal_is_bad)
+    pred_both_bad = combine_predictions(
+        pred_score_bad,
+        pred_score_max_bad,
+        norm_scores,
+        norm_scores_max,
+        threshold,
+        both_rule=BOTH_RULE,
+        equal_is_bad=equal_is_bad,
+    )
+
+    if args.scores_only:
+        return {"scores_only": pred_score_bad}
+
+    if args.scores_max_only:
+        return {"scores_max_only": pred_score_max_bad}
+
+    return {
+        "scores_only": pred_score_bad,
+        "scores_max_only": pred_score_max_bad,
+        f"both_{BOTH_RULE}": pred_both_bad,
+    }
+
+
+def prepare_model_arrays(
+    *,
+    model_name: str,
+    arrays: dict[str, np.ndarray],
+    global_score_scale: float | None,
+    global_score_max_scale: float | None,
+    global_score_ref_max: float | None,
+    global_score_max_ref_max: float | None,
+) -> dict | None:
+    """Clean, label, and normalize one model's arrays once.
+
+    Threshold-dependent predictions are made later from the normalized arrays.
+    """
+    scores = arrays["scores"]
+    scores_max = arrays["scores_max"]
+    first_run = arrays["first_run"].astype(int)
+
+    finite_mask = np.isfinite(scores) & np.isfinite(scores_max) & np.isfinite(first_run)
+    scores = scores[finite_mask]
+    scores_max = scores_max[finite_mask]
+    first_run = first_run[finite_mask]
+
+    y_true_bad, known_mask = build_true_labels(first_run)
+    if IGNORE_UNKNOWN_RUNS:
+        eval_mask = known_mask
+    else:
+        eval_mask = np.ones_like(known_mask, dtype=bool)
+
+    if not np.any(eval_mask):
+        print(f"WARNING: {model_name}: no known good/bad runs found; skipping metrics.")
+        return None
+
+    if NORMALIZATION_SCOPE == "per_model":
+        score_scale = choose_scale(
+            scores,
+            scale_mode=NORMALIZATION_SCALE_MODE,
+            percentile=NORMALIZATION_SCALE_PERCENTILE,
+            manual_scale=MANUAL_SCORE_SCALE,
+        )
+        score_max_scale = choose_scale(
+            scores_max,
+            scale_mode=NORMALIZATION_SCALE_MODE,
+            percentile=NORMALIZATION_SCALE_PERCENTILE,
+            manual_scale=MANUAL_SCORE_MAX_SCALE,
+        )
+        score_ref_max = safe_positive_scale(np.nanmax(finite_1d(scores)), scores, "score_ref_max")
+        score_max_ref_max = safe_positive_scale(np.nanmax(finite_1d(scores_max)), scores_max, "score_max_ref_max")
+    else:
+        score_scale = global_score_scale
+        score_max_scale = global_score_max_scale
+        score_ref_max = global_score_ref_max
+        score_max_ref_max = global_score_max_ref_max
+
+    norm_scores = transform_to_0_1(
+        scores,
+        mode=NORMALIZATION_MODE,
+        scale=score_scale,
+        reference_max=score_ref_max,
+        rescale_to_unit_max=RESCALE_TRANSFORM_TO_UNIT_MAX,
+    )
+    norm_scores_max = transform_to_0_1(
+        scores_max,
+        mode=NORMALIZATION_MODE,
+        scale=score_max_scale,
+        reference_max=score_max_ref_max,
+        rescale_to_unit_max=RESCALE_TRANSFORM_TO_UNIT_MAX,
+    )
+
+    return {
+        "model_name": model_name,
+        "scores": scores,
+        "scores_max": scores_max,
+        "first_run": first_run,
+        "y_true_bad": y_true_bad,
+        "eval_mask": eval_mask,
+        "norm_scores": norm_scores,
+        "norm_scores_max": norm_scores_max,
+        "score_scale": score_scale,
+        "score_max_scale": score_max_scale,
+        "score_ref_max": score_ref_max,
+        "score_max_ref_max": score_max_ref_max,
+    }
+
+
+def append_metrics_for_model_threshold(
+    *,
+    prepared: dict,
+    threshold: float,
+    args: argparse.Namespace,
+    summary_rows: list[dict],
+    run_rows: list[dict],
+) -> None:
+    """Append summary rows and per-run rows for one model at one threshold."""
+    model_name = prepared["model_name"]
+    scores = prepared["scores"]
+    first_run = prepared["first_run"]
+    y_true_bad = prepared["y_true_bad"]
+    eval_mask = prepared["eval_mask"]
+    norm_scores = prepared["norm_scores"]
+    norm_scores_max = prepared["norm_scores_max"]
+
+    evals = build_evaluations_for_threshold(
+        norm_scores=norm_scores,
+        norm_scores_max=norm_scores_max,
+        threshold=threshold,
+        args=args,
+    )
+
+    for method, pred_bad in evals.items():
+        metrics = confusion_and_metrics(y_true_bad[eval_mask], pred_bad[eval_mask])
+        row = {
+            "model_name": model_name,
+            "method": method,
+            "threshold": threshold,
+            "normalization_mode": NORMALIZATION_MODE,
+            "normalization_scope": NORMALIZATION_SCOPE,
+            "normalization_scale_mode": NORMALIZATION_SCALE_MODE,
+            "score_scale": prepared["score_scale"],
+            "score_max_scale": prepared["score_max_scale"],
+            "score_reference_max": prepared["score_ref_max"],
+            "score_max_reference_max": prepared["score_max_ref_max"],
+            "n_windows_total": int(scores.size),
+            "n_windows_evaluated": int(np.sum(eval_mask)),
+            "n_true_good_windows": int(np.sum((~y_true_bad) & eval_mask)),
+            "n_true_bad_windows": int(np.sum(y_true_bad & eval_mask)),
+            **metrics,
+        }
+        summary_rows.append(row)
+
+    # Per-run ratios for debugging and sanity checks.
+    for run in sorted(np.unique(first_run[eval_mask])):
+        run_mask = eval_mask & (first_run == run)
+        true_label = "bad" if run in bad_runs else "good" if run in good_runs else "unknown"
+        if not np.any(run_mask):
+            continue
+
+        for method, pred_bad in evals.items():
+            n = int(np.sum(run_mask))
+            n_pred_bad = int(np.sum(pred_bad[run_mask]))
+            n_pred_good = n - n_pred_bad
+            run_rows.append({
+                "model_name": model_name,
+                "threshold": threshold,
+                "run": int(run),
+                "true_label": true_label,
+                "method": method,
+                "n_windows": n,
+                "n_pred_bad": n_pred_bad,
+                "n_pred_good": n_pred_good,
+                "pred_bad_ratio": n_pred_bad / n if n > 0 else math.nan,
+                "pred_good_ratio": n_pred_good / n if n > 0 else math.nan,
+            })
+
+
 def main() -> int:
     args = parse_args()
-
-    if not (0.0 <= THRESHOLD <= 1.0):
-        raise ValueError("THRESHOLD must be between 0 and 1")
+    thresholds = get_thresholds()
 
     npz_files = find_npz_files(CHECKPOINTS_GNN_DIR, NPZ_NAME)
     if not npz_files:
@@ -504,7 +736,7 @@ def main() -> int:
     print(f"NORMALIZATION_MODE        = {NORMALIZATION_MODE}")
     print(f"NORMALIZATION_SCOPE       = {NORMALIZATION_SCOPE}")
     print(f"NORMALIZATION_SCALE_MODE  = {NORMALIZATION_SCALE_MODE}")
-    print(f"THRESHOLD                 = {THRESHOLD}")
+    print(f"THRESHOLDS                = {thresholds}")
     if args.scores_only:
         method_selection = "scores_only"
     elif args.scores_max_only:
@@ -513,10 +745,17 @@ def main() -> int:
         method_selection = "all: scores_only, scores_max_only, both"
 
     rank_metric = selected_rank_metric(args)
+    if rank_metric is not None:
+        output_order = f"ranked by {rank_metric}"
+    elif args.threshold_first:
+        output_order = "threshold-first: all models per threshold"
+    else:
+        output_order = "model-first: all thresholds per model"
 
     print(f"BOTH_RULE                 = {BOTH_RULE}")
     print(f"METHOD_SELECTION          = {method_selection}")
     print(f"RANK_METRIC               = {rank_metric if rank_metric is not None else 'none'}")
+    print(f"OUTPUT_ORDER              = {output_order}")
     print("=" * 80)
 
     loaded = {}
@@ -555,147 +794,69 @@ def main() -> int:
     else:
         raise ValueError("NORMALIZATION_SCOPE must be 'per_model' or 'global'")
 
+    prepared_by_model: dict[str, dict] = {}
+    for model_name, arrays in loaded.items():
+        prepared = prepare_model_arrays(
+            model_name=model_name,
+            arrays=arrays,
+            global_score_scale=global_score_scale,
+            global_score_max_scale=global_score_max_scale,
+            global_score_ref_max=global_score_ref_max,
+            global_score_max_ref_max=global_score_max_ref_max,
+        )
+        if prepared is not None:
+            prepared_by_model[model_name] = prepared
+
+    if not prepared_by_model:
+        print("No models with known-label windows were prepared.")
+        return 1
+
     summary_rows = []
     run_rows = []
 
-    for model_name, arrays in loaded.items():
-        scores = arrays["scores"]
-        scores_max = arrays["scores_max"]
-        first_run = arrays["first_run"].astype(int)
+    model_names = list(prepared_by_model.keys())
 
-        finite_mask = np.isfinite(scores) & np.isfinite(scores_max) & np.isfinite(first_run)
-        scores = scores[finite_mask]
-        scores_max = scores_max[finite_mask]
-        first_run = first_run[finite_mask]
-
-        y_true_bad, known_mask = build_true_labels(first_run)
-        if IGNORE_UNKNOWN_RUNS:
-            eval_mask = known_mask
-        else:
-            eval_mask = np.ones_like(known_mask, dtype=bool)
-
-        if not np.any(eval_mask):
-            print(f"WARNING: {model_name}: no known good/bad runs found; skipping metrics.")
-            continue
-
-        if NORMALIZATION_SCOPE == "per_model":
-            score_scale = choose_scale(
-                scores,
-                scale_mode=NORMALIZATION_SCALE_MODE,
-                percentile=NORMALIZATION_SCALE_PERCENTILE,
-                manual_scale=MANUAL_SCORE_SCALE,
+    if args.threshold_first:
+        for threshold in thresholds:
+            for model_name in model_names:
+                append_metrics_for_model_threshold(
+                    prepared=prepared_by_model[model_name],
+                    threshold=threshold,
+                    args=args,
+                    summary_rows=summary_rows,
+                    run_rows=run_rows,
+                )
+    else:
+        for model_name in model_names:
+            for threshold in thresholds:
+                append_metrics_for_model_threshold(
+                    prepared=prepared_by_model[model_name],
+                    threshold=threshold,
+                    args=args,
+                    summary_rows=summary_rows,
+                    run_rows=run_rows,
+                )
+            print(
+                f"Processed {model_name}: evaluated {int(np.sum(prepared_by_model[model_name]['eval_mask']))} "
+                f"known-label windows at {len(thresholds)} threshold(s)"
             )
-            score_max_scale = choose_scale(
-                scores_max,
-                scale_mode=NORMALIZATION_SCALE_MODE,
-                percentile=NORMALIZATION_SCALE_PERCENTILE,
-                manual_scale=MANUAL_SCORE_MAX_SCALE,
+
+    if args.threshold_first:
+        for model_name in model_names:
+            print(
+                f"Processed {model_name}: evaluated {int(np.sum(prepared_by_model[model_name]['eval_mask']))} "
+                f"known-label windows at {len(thresholds)} threshold(s)"
             )
-            score_ref_max = safe_positive_scale(np.nanmax(finite_1d(scores)), scores, "score_ref_max")
-            score_max_ref_max = safe_positive_scale(np.nanmax(finite_1d(scores_max)), scores_max, "score_max_ref_max")
-        else:
-            score_scale = global_score_scale
-            score_max_scale = global_score_max_scale
-            score_ref_max = global_score_ref_max
-            score_max_ref_max = global_score_max_ref_max
-
-        norm_scores = transform_to_0_1(
-            scores,
-            mode=NORMALIZATION_MODE,
-            scale=score_scale,
-            reference_max=score_ref_max,
-            rescale_to_unit_max=RESCALE_TRANSFORM_TO_UNIT_MAX,
-        )
-        norm_scores_max = transform_to_0_1(
-            scores_max,
-            mode=NORMALIZATION_MODE,
-            scale=score_max_scale,
-            reference_max=score_max_ref_max,
-            rescale_to_unit_max=RESCALE_TRANSFORM_TO_UNIT_MAX,
-        )
-
-        pred_score_bad = predict_bad(norm_scores, THRESHOLD, equal_is_bad=equal_is_bad)
-        pred_score_max_bad = predict_bad(norm_scores_max, THRESHOLD, equal_is_bad=equal_is_bad)
-        pred_both_bad = combine_predictions(
-            pred_score_bad,
-            pred_score_max_bad,
-            norm_scores,
-            norm_scores_max,
-            THRESHOLD,
-            both_rule=BOTH_RULE,
-            equal_is_bad=equal_is_bad,
-        )
-
-        if args.scores_only:
-            evals = {
-                "scores_only": pred_score_bad,
-            }
-        elif args.scores_max_only:
-            evals = {
-                "scores_max_only": pred_score_max_bad,
-            }
-        else:
-            evals = {
-                "scores_only": pred_score_bad,
-                "scores_max_only": pred_score_max_bad,
-                f"both_{BOTH_RULE}": pred_both_bad,
-            }
-
-        for method, pred_bad in evals.items():
-            metrics = confusion_and_metrics(y_true_bad[eval_mask], pred_bad[eval_mask])
-            row = {
-                "model_name": model_name,
-                "method": method,
-                "threshold": THRESHOLD,
-                "normalization_mode": NORMALIZATION_MODE,
-                "normalization_scope": NORMALIZATION_SCOPE,
-                "normalization_scale_mode": NORMALIZATION_SCALE_MODE,
-                "score_scale": score_scale,
-                "score_max_scale": score_max_scale,
-                "score_reference_max": score_ref_max,
-                "score_max_reference_max": score_max_ref_max,
-                "n_windows_total": int(scores.size),
-                "n_windows_evaluated": int(np.sum(eval_mask)),
-                "n_true_good_windows": int(np.sum((~y_true_bad) & eval_mask)),
-                "n_true_bad_windows": int(np.sum(y_true_bad & eval_mask)),
-                **metrics,
-            }
-            summary_rows.append(row)
-
-        # Per-run ratios for debugging and sanity checks.
-        for run in sorted(np.unique(first_run[eval_mask])):
-            run_mask = eval_mask & (first_run == run)
-            true_label = "bad" if run in bad_runs else "good" if run in good_runs else "unknown"
-            if not np.any(run_mask):
-                continue
-
-            for method, pred_bad in evals.items():
-                n = int(np.sum(run_mask))
-                n_pred_bad = int(np.sum(pred_bad[run_mask]))
-                n_pred_good = n - n_pred_bad
-                run_rows.append({
-                    "model_name": model_name,
-                    "run": int(run),
-                    "true_label": true_label,
-                    "method": method,
-                    "n_windows": n,
-                    "n_pred_bad": n_pred_bad,
-                    "n_pred_good": n_pred_good,
-                    "pred_bad_ratio": n_pred_bad / n if n > 0 else math.nan,
-                    "pred_good_ratio": n_pred_good / n if n > 0 else math.nan,
-                })
-
-        print(f"Processed {model_name}: evaluated {int(np.sum(eval_mask))} known-label windows")
 
     if not summary_rows:
         print("No summary rows produced.")
         return 1
 
     # Compact summary: this is always written.
-    # It contains only the columns needed for model/method ranking.
     compact_summary_fields = [
         "model_name",
         "method",
+        "threshold",
         "normalization_model",
         "TP", "TN", "FP", "FN",
         "precision", "recall", "F1", "accuracy",
@@ -713,17 +874,16 @@ def main() -> int:
         "true_good_pred_bad_ratio", "true_good_pred_good_ratio",
     ]
     run_fields = [
-        "model_name", "run", "true_label", "method", "n_windows",
+        "model_name", "threshold", "run", "true_label", "method", "n_windows",
         "n_pred_bad", "n_pred_good", "pred_bad_ratio", "pred_good_ratio",
     ]
 
-    # Convert the internal field name normalization_mode to the requested output
-    # header normalization_model in the compact CSV.
     compact_rows = []
     for row in summary_rows:
         compact_rows.append({
             "model_name": row["model_name"],
             "method": row["method"],
+            "threshold": row["threshold"],
             "normalization_model": row["normalization_mode"],
             "TP": row["TP"],
             "TN": row["TN"],
@@ -735,9 +895,9 @@ def main() -> int:
             "accuracy": row["accuracy"],
         })
 
-    # If requested, rank the model/method rows by the selected metric.
+    # If requested, rank the model/method/threshold rows by the selected metric.
     # This affects the compact CSV and the full summary CSV. The per-run CSV is
-    # left grouped by model/run because it is mainly for debugging.
+    # left in the selected model/threshold order because it is mainly for debugging.
     compact_rows = sort_rows_by_metric(compact_rows, rank_metric)
     summary_rows_for_output = sort_rows_by_metric(summary_rows, rank_metric)
 
@@ -751,11 +911,14 @@ def main() -> int:
         write_csv(full_summary_csv, summary_rows_for_output, full_summary_fields)
         write_csv(run_csv, run_rows, run_fields)
 
-    # Also print the best models by F1 for each method.
     print("\n" + "=" * 80)
     print(f"Saved compact summary CSV: {compact_summary_csv}")
     if rank_metric is not None:
-        print(f"CSV model/method rows ranked by {rank_metric} from high to low")
+        print(f"CSV model/method/threshold rows ranked by {rank_metric} from high to low")
+    elif args.threshold_first:
+        print("CSV rows written in threshold-first order")
+    else:
+        print("CSV rows written in model-first order")
     if args.full_summary:
         print(f"Saved full summary CSV: {full_summary_csv}")
         print(f"Saved per-run CSV: {run_csv}")
@@ -767,10 +930,11 @@ def main() -> int:
         method_rows = [row for row in summary_rows if row["method"] == method]
         method_rows = [row for row in method_rows if np.isfinite(row["F1"])]
         method_rows.sort(key=lambda r: r["F1"], reverse=True)
-        print(f"\nTop models by F1 for {method}:")
+        print(f"\nTop model/threshold combinations by F1 for {method}:")
         for row in method_rows[:10]:
             print(
                 f"  {row['model_name']:30s} "
+                f"threshold={row['threshold']:.4g} "
                 f"F1={row['F1']:.4f} "
                 f"precision={row['precision']:.4f} "
                 f"recall={row['recall']:.4f} "
