@@ -131,7 +131,7 @@ RESCALE_TRANSFORM_TO_UNIT_MAX = True
 # Classification thresholds after normalization.
 # predicted bad if normalized value > threshold by default.
 # The script evaluates every model at every threshold in this list.
-THRESHOLDS = [0.5, 0.7]
+THRESHOLDS = [0.5]
 
 # What to do with values exactly equal to the threshold.
 # False: value == threshold is predicted good.
