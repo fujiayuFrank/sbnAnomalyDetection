@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-Plot GNN sweep summary CSV files.
+Simplified GNN sweep plotting script.
 
-This version uses internal paths/settings.
-You do NOT need to pass --input from the command line.
+This version uses internal paths/settings. You do NOT need to pass --input.
+
+Optional command-line method filters:
+
+    python plot_sweep_metrics_simplified.py --scores-only
+    python plot_sweep_metrics_simplified.py --scores-max-only
+
+Optional CSV summary output:
+
+    python plot_sweep_metrics_simplified.py --plot-summary
+
+By default, the script saves plots only.
+CSV summary files are saved only when --plot-summary is given.
 
 Expected CSV columns:
 
@@ -24,17 +35,39 @@ The script extracts:
 
 Then it creates:
 
-    heatmaps/
-    metric_vs_history/
-    metric_vs_window_size/
-    precision_recall/
-    tables/
+    plots/
+      01_metric_histograms/
+        accuracy_histogram.png
+        precision_histogram.png
+        recall_histogram.png
+        F1_histogram.png
+
+      02_metric_relations/
+        accuracy/
+          vary_window_size/
+          vary_window_stride/
+          vary_history/
+        precision/
+        recall/
+        F1/
+
+For relation plots, the script fixes two of:
+
+    window_size, window_stride, history
+
+and plots the metric against the remaining third variable.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
+from itertools import combinations
 from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")  # non-GUI backend; safe for SSH/Plink sessions
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -51,10 +84,10 @@ INPUT_PATH = Path(
 
 # Or use a directory containing CSV files:
 # INPUT_PATH = Path(
-#     "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/"
+#     "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/threshold_evaluation/"
 # )
 
-# Output directory for plots and tables.
+# Output directory for plots.
 # If None, the script creates "plots" next to the CSV file
 # or inside the input directory.
 OUTPUT_DIR = None
@@ -72,13 +105,37 @@ THRESHOLD = None
 NORMALIZATION_MODEL = None
 # NORMALIZATION_MODEL = "tanh"
 
-# Which metric to plot.
-# Options:
-#   "all", "precision", "recall", "F1", "accuracy", "TP", "TN", "FP", "FN"
-METRIC = "all"
+# Metrics to plot. TP/TN/FP/FN are intentionally ignored.
+PLOT_METRICS = ["accuracy", "precision", "recall", "F1"]
 
-# Number of top models saved in summary tables.
-TOP_N = 10
+# Histogram bin control.
+# Examples:
+#   HIST_BINS = 20
+#   HIST_BINS = 50
+#   HIST_BINS = [0.0, 0.1, 0.2, ..., 1.0]
+HIST_BINS = 30
+
+# Plot relation line markers.
+MARKER = "o"
+
+# Y-axis behavior for relation plots.
+# True:
+#   Zoom y-axis to the actual data range.
+#   This is better when all metric values are close together.
+# False:
+#   Use full [0, 1] range for accuracy/precision/recall/F1.
+AUTO_YLIM = True
+
+# Padding fraction for automatic y-axis zoom.
+Y_PAD_FRACTION = 0.10
+
+# Minimum padding when all y-values are identical.
+Y_MIN_PAD = 1e-4
+
+# Default CSV behavior.
+# Keep this False so the script does not save CSV files by default.
+# Use --plot-summary to save CSV outputs.
+SAVE_RELATION_CSV = False
 
 
 # ============================================================
@@ -100,17 +157,9 @@ REQUIRED_COLUMNS = {
     "accuracy",
 }
 
-
-METRIC_COLUMNS = [
-    "precision",
-    "recall",
-    "F1",
-    "accuracy",
-    "TP",
-    "TN",
-    "FP",
-    "FN",
-]
+METRIC_COLUMNS = ["accuracy", "precision", "recall", "F1"]
+MODEL_VARIABLES = ["window_size", "window_stride", "history"]
+CONTEXT_COLUMNS = ["method", "normalization_model", "threshold"]
 
 
 def find_csv_files(input_path: Path) -> list[Path]:
@@ -200,6 +249,17 @@ def filter_dataframe(
     return out
 
 
+def make_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert metric and parameter columns to numeric values."""
+    out = df.copy()
+
+    for col in METRIC_COLUMNS + MODEL_VARIABLES + ["threshold"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    out = out.dropna(subset=METRIC_COLUMNS + MODEL_VARIABLES)
+    return out
+
+
 def safe_name(value: object) -> str:
     """Make a filesystem-safe name fragment."""
     text = str(value)
@@ -208,458 +268,220 @@ def safe_name(value: object) -> str:
     return text.strip("_")
 
 
-def format_cell_value(metric: str, value: float) -> str:
-    """Format heatmap cell labels."""
-    if pd.isna(value):
-        return ""
-
-    if metric in {"TP", "TN", "FP", "FN"}:
-        return f"{value:.0f}"
-
-    return f"{value:.3g}"
-
-
-def plot_heatmaps(
-    df: pd.DataFrame,
-    metric: str,
-    output_dir: Path,
-) -> None:
-    """
-    Make heatmaps.
-
-    One heatmap per:
-
-        method
-        normalization_model
-        threshold
-        history
-
-    Axes:
-
-        x-axis: window_stride
-        y-axis: window_size
-        color: metric
-    """
-    heatmap_dir = output_dir / "heatmaps" / metric
-    heatmap_dir.mkdir(parents=True, exist_ok=True)
-
-    group_cols = ["method", "normalization_model", "threshold", "history"]
-
-    for keys, part in df.groupby(group_cols):
-        method, norm, threshold, hist = keys
-
-        pivot = part.pivot_table(
-            index="window_size",
-            columns="window_stride",
-            values=metric,
-            aggfunc="mean",
-        )
-
-        if pivot.empty:
-            continue
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        im = ax.imshow(pivot.values, aspect="auto")
-
-        ax.set_xticks(range(len(pivot.columns)))
-        ax.set_xticklabels(pivot.columns)
-
-        ax.set_yticks(range(len(pivot.index)))
-        ax.set_yticklabels(pivot.index)
-
-        ax.set_xlabel("window_stride")
-        ax.set_ylabel("window_size")
-
-        ax.set_title(
-            f"{metric} heatmap\n"
-            f"method={method}, norm={norm}, threshold={threshold}, history={hist}"
-        )
-
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label(metric)
-
-        # Add numbers inside cells.
-        for i in range(len(pivot.index)):
-            for j in range(len(pivot.columns)):
-                value = pivot.values[i, j]
-                label = format_cell_value(metric, value)
-                if label:
-                    ax.text(
-                        j,
-                        i,
-                        label,
-                        ha="center",
-                        va="center",
-                        fontsize=8,
-                    )
-
-        fig.tight_layout()
-
-        filename = (
-            f"heatmap_{metric}"
-            f"_method-{safe_name(method)}"
-            f"_norm-{safe_name(norm)}"
-            f"_thr-{safe_name(threshold)}"
-            f"_hist-{safe_name(hist)}.png"
-        )
-
-        fig.savefig(heatmap_dir / filename, dpi=200)
-        plt.close(fig)
-
-
-def plot_metric_vs_history(
-    df: pd.DataFrame,
-    metric: str,
-    output_dir: Path,
-) -> None:
-    """
-    Plot average metric vs history.
-
-    One line per window_size.
-    Separate plot per method, normalization_model, threshold.
-    """
-    line_dir = output_dir / "metric_vs_history" / metric
-    line_dir.mkdir(parents=True, exist_ok=True)
-
-    group_cols = ["method", "normalization_model", "threshold"]
-
-    for keys, part in df.groupby(group_cols):
-        method, norm, threshold = keys
-
-        summary = (
-            part.groupby(["history", "window_size"], as_index=False)[metric]
-            .mean()
-            .sort_values(["window_size", "history"])
-        )
-
-        if summary.empty:
-            continue
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        for window_size, p in summary.groupby("window_size"):
-            ax.plot(
-                p["history"],
-                p[metric],
-                marker="o",
-                label=f"win={window_size}",
-            )
-
-        ax.set_xlabel("history")
-        ax.set_ylabel(metric)
-        ax.set_title(
-            f"{metric} vs history\n"
-            f"method={method}, norm={norm}, threshold={threshold}"
-        )
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        fig.tight_layout()
-
-        filename = (
-            f"history_{metric}"
-            f"_method-{safe_name(method)}"
-            f"_norm-{safe_name(norm)}"
-            f"_thr-{safe_name(threshold)}.png"
-        )
-
-        fig.savefig(line_dir / filename, dpi=200)
-        plt.close(fig)
-
-
-def plot_metric_vs_window_size(
-    df: pd.DataFrame,
-    metric: str,
-    output_dir: Path,
-) -> None:
-    """
-    Plot average metric vs window_size.
-
-    One line per history.
-    Separate plot per method, normalization_model, threshold.
-    """
-    line_dir = output_dir / "metric_vs_window_size" / metric
-    line_dir.mkdir(parents=True, exist_ok=True)
-
-    group_cols = ["method", "normalization_model", "threshold"]
-
-    for keys, part in df.groupby(group_cols):
-        method, norm, threshold = keys
-
-        summary = (
-            part.groupby(["window_size", "history"], as_index=False)[metric]
-            .mean()
-            .sort_values(["history", "window_size"])
-        )
-
-        if summary.empty:
-            continue
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        for hist, p in summary.groupby("history"):
-            ax.plot(
-                p["window_size"],
-                p[metric],
-                marker="o",
-                label=f"hist={hist}",
-            )
-
-        ax.set_xlabel("window_size")
-        ax.set_ylabel(metric)
-        ax.set_title(
-            f"{metric} vs window_size\n"
-            f"method={method}, norm={norm}, threshold={threshold}"
-        )
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        fig.tight_layout()
-
-        filename = (
-            f"window_size_{metric}"
-            f"_method-{safe_name(method)}"
-            f"_norm-{safe_name(norm)}"
-            f"_thr-{safe_name(threshold)}.png"
-        )
-
-        fig.savefig(line_dir / filename, dpi=200)
-        plt.close(fig)
-
-
-def plot_metric_vs_stride(
-    df: pd.DataFrame,
-    metric: str,
-    output_dir: Path,
-) -> None:
-    """
-    Plot average metric vs window_stride.
-
-    One line per history.
-    Separate plot per method, normalization_model, threshold.
-    """
-    line_dir = output_dir / "metric_vs_stride" / metric
-    line_dir.mkdir(parents=True, exist_ok=True)
-
-    group_cols = ["method", "normalization_model", "threshold"]
-
-    for keys, part in df.groupby(group_cols):
-        method, norm, threshold = keys
-
-        summary = (
-            part.groupby(["window_stride", "history"], as_index=False)[metric]
-            .mean()
-            .sort_values(["history", "window_stride"])
-        )
-
-        if summary.empty:
-            continue
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        for hist, p in summary.groupby("history"):
-            ax.plot(
-                p["window_stride"],
-                p[metric],
-                marker="o",
-                label=f"hist={hist}",
-            )
-
-        ax.set_xlabel("window_stride")
-        ax.set_ylabel(metric)
-        ax.set_title(
-            f"{metric} vs window_stride\n"
-            f"method={method}, norm={norm}, threshold={threshold}"
-        )
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        fig.tight_layout()
-
-        filename = (
-            f"stride_{metric}"
-            f"_method-{safe_name(method)}"
-            f"_norm-{safe_name(norm)}"
-            f"_thr-{safe_name(threshold)}.png"
-        )
-
-        fig.savefig(line_dir / filename, dpi=200)
-        plt.close(fig)
-
-
-def plot_precision_recall_top_models(
-    df: pd.DataFrame,
-    output_dir: Path,
-    top_n: int,
-) -> None:
-    """
-    Plot precision-recall points for top models.
-
-    This is most useful when multiple thresholds exist.
-    Top models are selected by best F1 over all thresholds.
-    """
-    pr_dir = output_dir / "precision_recall"
-    pr_dir.mkdir(parents=True, exist_ok=True)
-
-    ranking = (
-        df.sort_values("F1", ascending=False)
-        .drop_duplicates(["model_name", "method", "normalization_model"])
-        .head(top_n)
+def metric_label(metric: str) -> str:
+    """Human-friendly metric label."""
+    if metric == "F1":
+        return "F1 score"
+    return metric
+
+
+def context_name(method: object, norm: object, threshold: object) -> str:
+    """Compact label for method/norm/threshold."""
+    return f"method={method}, norm={norm}, threshold={threshold}"
+
+
+def context_filename(method: object, norm: object, threshold: object) -> str:
+    """Filesystem-safe context name."""
+    return (
+        f"method-{safe_name(method)}"
+        f"_norm-{safe_name(norm)}"
+        f"_thr-{safe_name(threshold)}"
     )
 
-    selected_keys = set(
-        zip(
-            ranking["model_name"],
-            ranking["method"],
-            ranking["normalization_model"],
-        )
-    )
 
-    selected = df[
-        df.apply(
-            lambda row: (
-                row["model_name"],
-                row["method"],
-                row["normalization_model"],
-            )
-            in selected_keys,
-            axis=1,
-        )
-    ].copy()
+def apply_y_limits(ax: plt.Axes, metric: str, y_values: pd.Series) -> None:
+    """Apply y-axis limits for relation plots."""
+    y_values = y_values.dropna()
 
-    if selected.empty:
+    if y_values.empty:
         return
 
-    for keys, part in selected.groupby(["method", "normalization_model"]):
-        method, norm = keys
+    if AUTO_YLIM:
+        y_min = float(y_values.min())
+        y_max = float(y_values.max())
 
-        fig, ax = plt.subplots(figsize=(8, 6))
+        if y_min == y_max:
+            pad = max(abs(y_min) * Y_PAD_FRACTION, Y_MIN_PAD)
+        else:
+            pad = (y_max - y_min) * Y_PAD_FRACTION
 
-        for model_name, p in part.groupby("model_name"):
-            p = p.sort_values("threshold")
-            ax.plot(
-                p["recall"],
-                p["precision"],
-                marker="o",
-                label=model_name,
+        ax.set_ylim(y_min - pad, y_max + pad)
+    else:
+        if metric in {"accuracy", "precision", "recall", "F1"}:
+            ax.set_ylim(0.0, 1.0)
+
+
+def plot_metric_histograms(df: pd.DataFrame, output_dir: Path) -> None:
+    """
+    Plot one histogram per metric over all filtered rows/models.
+
+    These are saved directly inside the first plot directory:
+
+        output_dir / "01_metric_histograms"
+    """
+    hist_dir = output_dir / "01_metric_histograms"
+    hist_dir.mkdir(parents=True, exist_ok=True)
+
+    for metric in PLOT_METRICS:
+        values = df[metric].dropna()
+        if values.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.hist(values, bins=HIST_BINS, edgecolor="black", alpha=0.8)
+
+        ax.set_xlabel(metric_label(metric))
+        ax.set_ylabel("Number of rows/models")
+        ax.set_title(f"Distribution of {metric_label(metric)} over all filtered models")
+        ax.grid(True, alpha=0.3)
+
+        stats_text = (
+            f"n = {len(values)}\n"
+            f"mean = {values.mean():.4g}\n"
+            f"median = {values.median():.4g}\n"
+            f"min = {values.min():.4g}\n"
+            f"max = {values.max():.4g}"
+        )
+        ax.text(
+            0.98,
+            0.95,
+            stats_text,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.8},
+            fontsize=9,
+        )
+
+        fig.tight_layout()
+        fig.savefig(hist_dir / f"{safe_name(metric)}_histogram.png", dpi=200)
+        plt.close(fig)
+
+
+def plot_relation_for_fixed_pair(
+    df: pd.DataFrame,
+    metric: str,
+    fixed_vars: tuple[str, str],
+    vary_var: str,
+    output_dir: Path,
+    save_csv: bool,
+) -> None:
+    """
+    For one metric and one choice of fixed variables, plot metric vs vary_var.
+
+    Example:
+        fixed_vars = ("window_stride", "history")
+        vary_var = "window_size"
+
+    This creates one plot for every combination of:
+        method, normalization_model, threshold, fixed_var_1 value, fixed_var_2 value
+    """
+    metric_dir = output_dir / "02_metric_relations" / safe_name(metric) / f"vary_{vary_var}"
+    metric_dir.mkdir(parents=True, exist_ok=True)
+
+    group_cols = CONTEXT_COLUMNS + list(fixed_vars)
+
+    for keys, part in df.groupby(group_cols, dropna=False):
+        method, norm, threshold, fixed_value_1, fixed_value_2 = keys
+
+        summary = (
+            part.groupby(vary_var, as_index=False)[metric]
+            .agg(mean="mean", std="std", count="count")
+            .sort_values(vary_var)
+        )
+
+        if summary.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        ax.plot(
+            summary[vary_var],
+            summary["mean"],
+            marker=MARKER,
+            label=metric_label(metric),
+        )
+
+        # If there are duplicate rows for the same x value, show standard deviation.
+        if (summary["count"] > 1).any() and summary["std"].notna().any():
+            ax.errorbar(
+                summary[vary_var],
+                summary["mean"],
+                yerr=summary["std"].fillna(0.0),
+                fmt="none",
+                capsize=3,
             )
 
-            # Label threshold near each point.
-            for _, row in p.iterrows():
-                ax.text(
-                    row["recall"],
-                    row["precision"],
-                    str(row["threshold"]),
-                    fontsize=7,
-                )
-
-        ax.set_xlabel("recall")
-        ax.set_ylabel("precision")
+        ax.set_xlabel(vary_var)
+        ax.set_ylabel(metric_label(metric))
         ax.set_title(
-            f"Precision-recall for top {top_n} models\n"
-            f"method={method}, norm={norm}"
+            f"{metric_label(metric)} vs {vary_var}\n"
+            f"fixed {fixed_vars[0]}={fixed_value_1}, {fixed_vars[1]}={fixed_value_2}\n"
+            f"{context_name(method, norm, threshold)}"
         )
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=7)
+
+        apply_y_limits(ax, metric, summary["mean"])
 
         fig.tight_layout()
 
         filename = (
-            f"precision_recall"
-            f"_method-{safe_name(method)}"
-            f"_norm-{safe_name(norm)}.png"
+            f"{safe_name(metric)}_vs_{safe_name(vary_var)}"
+            f"_fixed-{safe_name(fixed_vars[0])}-{safe_name(fixed_value_1)}"
+            f"_{safe_name(fixed_vars[1])}-{safe_name(fixed_value_2)}"
+            f"_{context_filename(method, norm, threshold)}.png"
         )
 
-        fig.savefig(pr_dir / filename, dpi=200)
+        fig.savefig(metric_dir / filename, dpi=200)
         plt.close(fig)
 
+        if save_csv:
+            csv_name = filename.replace(".png", ".csv")
+            summary.to_csv(metric_dir / csv_name, index=False)
 
-def save_top_tables(
+
+def plot_all_metric_relations(
     df: pd.DataFrame,
     output_dir: Path,
-    top_n: int,
+    save_csv: bool,
 ) -> None:
-    """Save top-N model tables ranked by F1."""
-    table_dir = output_dir / "tables"
+    """
+    For each metric, fix two model variables and vary the third.
+
+    Model variables:
+        window_size, window_stride, history
+
+    For three variables, this automatically creates:
+        metric vs window_size, fixed window_stride/history
+        metric vs window_stride, fixed window_size/history
+        metric vs history, fixed window_size/window_stride
+    """
+    for metric in PLOT_METRICS:
+        for fixed_vars in combinations(MODEL_VARIABLES, 2):
+            vary_candidates = [v for v in MODEL_VARIABLES if v not in fixed_vars]
+            if len(vary_candidates) != 1:
+                raise RuntimeError("Expected exactly one varying variable.")
+
+            vary_var = vary_candidates[0]
+
+            plot_relation_for_fixed_pair(
+                df=df,
+                metric=metric,
+                fixed_vars=fixed_vars,
+                vary_var=vary_var,
+                output_dir=output_dir,
+                save_csv=save_csv,
+            )
+
+
+def save_clean_dataframe(df: pd.DataFrame, output_dir: Path) -> None:
+    """
+    Save the parsed and filtered dataframe for checking.
+
+    This function is only called when --plot-summary is given.
+    """
+    table_dir = output_dir / "03_tables"
     table_dir.mkdir(parents=True, exist_ok=True)
-
-    sort_cols = [
-        "F1",
-        "recall",
-        "precision",
-        "accuracy",
-    ]
-
-    base_cols = [
-        "model_name",
-        "method",
-        "threshold",
-        "normalization_model",
-        "window_size",
-        "window_stride",
-        "history",
-        "TP",
-        "TN",
-        "FP",
-        "FN",
-        "precision",
-        "recall",
-        "F1",
-        "accuracy",
-        "source_csv",
-    ]
-
-    top_all = df.sort_values(sort_cols, ascending=False).head(top_n)
-    top_all[base_cols].to_csv(table_dir / f"top_{top_n}_overall.csv", index=False)
-
-    group_cols = ["method", "normalization_model", "threshold"]
-
-    top_by_group = (
-        df.sort_values(sort_cols, ascending=False)
-        .groupby(group_cols, as_index=False)
-        .head(top_n)
-    )
-
-    top_by_group[base_cols].to_csv(table_dir / f"top_{top_n}_by_group.csv", index=False)
-
-    best_per_history = (
-        df.sort_values(sort_cols, ascending=False)
-        .groupby(
-            ["method", "normalization_model", "threshold", "history"],
-            as_index=False,
-        )
-        .head(1)
-    )
-
-    best_per_history[base_cols].to_csv(table_dir / "best_per_history.csv", index=False)
-
-
-def print_summary(df: pd.DataFrame, output_dir: Path, top_n: int) -> None:
-    """Print a compact terminal summary."""
-    print()
-    print("=" * 80)
-    print("Loaded rows:", len(df))
-    print("Output directory:", output_dir)
-    print("=" * 80)
-
-    print()
-    print("Available methods:")
-    for value in sorted(df["method"].dropna().unique()):
-        print(f"  {value}")
-
-    print()
-    print("Available normalization models:")
-    for value in sorted(df["normalization_model"].dropna().unique()):
-        print(f"  {value}")
-
-    print()
-    print("Available thresholds:")
-    for value in sorted(df["threshold"].dropna().unique()):
-        print(f"  {value}")
-
-    print()
-    print(f"Top {top_n} rows by F1:")
 
     cols = [
         "model_name",
@@ -669,23 +491,127 @@ def print_summary(df: pd.DataFrame, output_dir: Path, top_n: int) -> None:
         "window_size",
         "window_stride",
         "history",
+        "accuracy",
         "precision",
         "recall",
         "F1",
-        "accuracy",
-        "TP",
-        "FP",
-        "FN",
+        "source_csv",
     ]
 
-    print(
-        df.sort_values("F1", ascending=False)[cols]
-        .head(top_n)
-        .to_string(index=False)
+    df[cols].to_csv(table_dir / "parsed_filtered_metrics.csv", index=False)
+
+    top = df.sort_values(["F1", "recall", "precision", "accuracy"], ascending=False)
+    top[cols].head(50).to_csv(table_dir / "top_50_by_F1.csv", index=False)
+
+
+def print_summary(
+    df: pd.DataFrame,
+    output_dir: Path,
+    effective_method: str | None,
+    plot_summary: bool,
+) -> None:
+    """Print a compact terminal summary."""
+    print()
+    print("=" * 80)
+    print("Loaded rows after filtering:", len(df))
+    print("Output directory:", output_dir)
+    print("Active method filter:", effective_method)
+    print("Histogram bins:", HIST_BINS)
+    print("Auto y-axis limits:", AUTO_YLIM)
+    print("Full CSV summary:", plot_summary)
+    print("=" * 80)
+
+    print()
+    print("Available methods in filtered data:")
+    for value in sorted(df["method"].dropna().unique()):
+        print(f"  {value}")
+
+    print()
+    print("Available normalization models in filtered data:")
+    for value in sorted(df["normalization_model"].dropna().unique()):
+        print(f"  {value}")
+
+    print()
+    print("Available thresholds in filtered data:")
+    for value in sorted(df["threshold"].dropna().unique()):
+        print(f"  {value}")
+
+    print()
+    print("Metric summary:")
+    print(df[PLOT_METRICS].describe().to_string())
+
+    print()
+    print("Top 10 by F1:")
+    cols = [
+        "model_name",
+        "method",
+        "threshold",
+        "normalization_model",
+        "window_size",
+        "window_stride",
+        "history",
+        "accuracy",
+        "precision",
+        "recall",
+        "F1",
+    ]
+    print(df.sort_values("F1", ascending=False)[cols].head(10).to_string(index=False))
+
+
+def parse_cli_args() -> argparse.Namespace:
+    """Parse optional method-filter and output flags.
+
+    The script still uses internal paths/settings. These flags only override
+    selected behavior when explicitly requested.
+    """
+    parser = argparse.ArgumentParser(
+        description="Plot simplified GNN sweep metrics using internal paths/settings."
     )
+
+    method_group = parser.add_mutually_exclusive_group()
+    method_group.add_argument(
+        "--scores-only",
+        "--scores_only",
+        action="store_true",
+        help="Only plot rows with method == 'scores_only'.",
+    )
+    method_group.add_argument(
+        "--scores-max-only",
+        "--scores_max_only",
+        "--scores-max_only",
+        "--scores_max-only",
+        action="store_true",
+        help="Only plot rows with method == 'scores_max_only'.",
+    )
+
+    parser.add_argument(
+        "--plot-summary",
+        "--plot_summary",
+        action="store_true",
+        help=(
+            "Save CSV summary files in addition to plots. "
+            "By default, no CSV files are written."
+        ),
+    )
+
+    return parser.parse_args()
+
+
+def get_effective_method(args: argparse.Namespace) -> str | None:
+    """Return the method filter after applying command-line overrides."""
+    if args.scores_only:
+        return "scores_only"
+
+    if args.scores_max_only:
+        return "scores_max_only"
+
+    return METHOD
 
 
 def main() -> int:
+    args = parse_cli_args()
+    effective_method = get_effective_method(args)
+
     input_path = INPUT_PATH.resolve()
 
     if OUTPUT_DIR is not None:
@@ -703,38 +629,48 @@ def main() -> int:
 
     df = filter_dataframe(
         df,
-        method=METHOD,
+        method=effective_method,
         threshold=THRESHOLD,
         normalization_model=NORMALIZATION_MODEL,
     )
 
-    # Make numeric columns safe.
-    for col in METRIC_COLUMNS + ["threshold"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = make_numeric(df)
 
-    if METRIC == "all":
-        metrics = ["F1", "recall", "precision", "accuracy", "TP", "FP", "FN"]
-    else:
-        if METRIC not in METRIC_COLUMNS:
-            raise ValueError(
-                f"Invalid METRIC={METRIC!r}. "
-                f"Allowed values are: all, {', '.join(METRIC_COLUMNS)}"
-            )
-        metrics = [METRIC]
+    if df.empty:
+        raise ValueError("No valid numeric rows remain after parsing/filtering.")
 
-    for metric in metrics:
-        plot_heatmaps(df, metric, output_dir)
-        plot_metric_vs_history(df, metric, output_dir)
-        plot_metric_vs_window_size(df, metric, output_dir)
-        plot_metric_vs_stride(df, metric, output_dir)
+    # Always save plots.
+    plot_metric_histograms(df, output_dir)
 
-    plot_precision_recall_top_models(df, output_dir, TOP_N)
-    save_top_tables(df, output_dir, TOP_N)
-    print_summary(df, output_dir, TOP_N)
+    # Save relation CSVs only with --plot-summary, unless SAVE_RELATION_CSV
+    # is manually set to True in the user settings.
+    save_relation_csv = SAVE_RELATION_CSV or args.plot_summary
+    plot_all_metric_relations(
+        df=df,
+        output_dir=output_dir,
+        save_csv=save_relation_csv,
+    )
+
+    # Save table CSVs only with --plot-summary.
+    if args.plot_summary:
+        save_clean_dataframe(df, output_dir)
+
+    print_summary(
+        df=df,
+        output_dir=output_dir,
+        effective_method=effective_method,
+        plot_summary=args.plot_summary,
+    )
 
     print()
     print("Done.")
-    print(f"Plots saved to: {output_dir}")
+    print(f"Histogram plots saved to: {output_dir / '01_metric_histograms'}")
+    print(f"Relation plots saved to: {output_dir / '02_metric_relations'}")
+
+    if args.plot_summary:
+        print(f"CSV summaries saved to: {output_dir / '03_tables'}")
+    else:
+        print("CSV summaries were not saved. Use --plot-summary to save them.")
 
     return 0
 

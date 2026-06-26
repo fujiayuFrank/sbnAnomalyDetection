@@ -21,6 +21,7 @@ For every model directory, this script:
   7. optionally restricts output to scores-only or scores_max-only with CLI flags
   8. optionally ranks CSV output by precision, recall, F1, or accuracy
   9. optionally changes output sequence with --threshold-first
+ 10. optionally runs the plotting script afterward with --with-plot
 
 Available command-line flags:
 
@@ -50,6 +51,10 @@ Available command-line flags:
         Change the unranked output order. By default, the script evaluates all
         thresholds for one model before moving to the next model. With this flag,
         it evaluates all models for one threshold before moving to the next threshold.
+
+    --with-plot
+        After writing threshold_metrics_summary.csv, run the plotting script located
+        in the graphing/ directory relative to this script.
 
 Notes:
   - --scores-only and --scores-max-only are mutually exclusive.
@@ -90,6 +95,8 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, Literal
 
@@ -105,6 +112,14 @@ NPZ_NAME = "inference_scores.npz"
 
 OUTPUT_DIR = Path("threshold_evaluation")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Plotting script location, relative to this file.
+# If your plotting script has a different filename, change this one line.
+PLOT_SCRIPT_RELATIVE = Path("graphing/plot_sweep_metrics.py")
+
+# Extra arguments always passed to the plotting script when --with-plot is used.
+# Example: PLOT_SCRIPT_EXTRA_ARGS = ["--full-summary"]
+PLOT_SCRIPT_EXTRA_ARGS: list[str] = []
 
 # Choose normalization transform.
 # Options: "tanh", "sigmoid", "global_max", "none"
@@ -407,6 +422,38 @@ def write_csv(path: Path, rows: list[dict], fieldnames: Iterable[str]) -> None:
             writer.writerow(row)
 
 
+def run_plotting_script(args: argparse.Namespace) -> None:
+    import subprocess
+    import sys
+
+    script_dir = Path(__file__).resolve().parent
+    plot_script = script_dir / PLOT_SCRIPT_RELATIVE
+
+    if not plot_script.exists():
+        raise FileNotFoundError(f"Plotting script does not exist: {plot_script}")
+
+    plot_cmd = [sys.executable, str(plot_script)]
+
+    # Forward method-selection flags because they affect which CSV rows are plotted.
+    if args.scores_only:
+        plot_cmd.append("--scores-only")
+
+    if args.scores_max_only:
+        plot_cmd.append("--scores-max-only")
+
+    # Forward only the plotting summary flag, not evaluator --full-summary.
+    if args.plot_summary:
+        plot_cmd.append("--plot-summary")
+
+    print()
+    print("=" * 80)
+    print("Running plotting script:")
+    print(" ".join(plot_cmd))
+    print("=" * 80)
+
+    subprocess.run(plot_cmd, check=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate checkpoints/gnn/*/inference_scores.npz with threshold-based good/bad prediction."
@@ -429,6 +476,25 @@ def parse_args() -> argparse.Namespace:
             "thresholds for one model before moving to the next model. With this flag, "
             "it writes all models for one threshold before moving to the next threshold. "
             "If a rank flag is used, ranking overrides this order."
+        ),
+    )
+    parser.add_argument(
+        "--with-plot",
+        "--with_plot",
+        action="store_true",
+        help=(
+            "After writing the compact summary CSV, run the plotting script in the "
+            "graphing/ directory relative to this script."
+        ),
+    )
+
+    parser.add_argument(
+        "--plot-summary",
+        "--plot_summary",
+        action="store_true",
+        help=(
+            "Only used with --with-plot. Forward --plot-summary to the plotting "
+            "script so it also writes its own plot summary CSV files."
         ),
     )
 
@@ -948,6 +1014,9 @@ def main() -> int:
                 f"recall={row['recall']:.4f} "
                 f"TP={row['TP']} TN={row['TN']} FP={row['FP']} FN={row['FN']}"
             )
+
+    if args.with_plot:
+        return run_plotting_script(args)
 
     return 0
 
