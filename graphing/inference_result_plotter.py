@@ -7,9 +7,9 @@ import matplotlib.pyplot as plt
 # Input / output
 # ============================================================
 
-npz_path = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/checkpoints/gnn/June-22-test/inference_scores.npz"
+npz_path = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/checkpoints/gnn/0080_win100_stride100_hist10/inference_scores.npz"
 
-out_dir = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/inference_result_plots/June-22-scores"
+out_dir = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/inference_result_plots/0080_win100_stride100_hist10"
 os.makedirs(out_dir, exist_ok=True)
 
 # ============================================================
@@ -19,7 +19,31 @@ os.makedirs(out_dir, exist_ok=True)
 bins = 60
 
 # x-axis cutoff. Only show up to this percentile of the selected runs.
-percentile = 75
+# The visible cutoff is still based on this percentile, but the x-axis
+# is normalized by the true maximum value in the whole array, not by this percentile.
+percentile = 80
+
+# X-axis transform mode.
+#
+# Options:
+#   "none"       : keep original raw score scale
+#   "global_max" : x / max(x) over the whole finite array
+#   "tanh"       : tanh(x / scale), then normalized so the whole-data max maps to 1
+#   "sigmoid"    : sigmoid(x / scale), shifted so 0 maps to 0, then normalized so
+#                  the whole-data max maps to 1
+#
+# For your current case, "tanh" or "sigmoid" is better than "global_max", because
+# the true max is a huge outlier and global_max squeezes ordinary values to x ~ 0.
+x_axis_transform = "tanh"
+
+# Scale for tanh/sigmoid x-axis transforms, in raw score units.
+# If None, the script uses the current visible cutoff x_max, i.e. the selected
+# percentile cutoff. This does NOT normalize the cutoff to 1; it only controls
+# how strongly tanh/sigmoid stretch the low-score region.
+#
+# Smaller scale  -> stronger stretching of small scores
+# Larger scale   -> closer to linear/global-max behavior
+x_transform_scale = None
 
 # Do NOT use density for this mode.
 # Instead, each bin is normalized by the total number of windows in that run.
@@ -172,6 +196,65 @@ def resolve_runs_to_plot(all_runs, requested_runs):
     return selected_runs
 
 
+
+def _stable_sigmoid(z):
+    """Numerically stable sigmoid for numpy arrays/scalars."""
+    z = np.asarray(z, dtype=float)
+    out = np.empty_like(z, dtype=float)
+
+    pos = z >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+
+    exp_z = np.exp(z[~pos])
+    out[~pos] = exp_z / (1.0 + exp_z)
+
+    return out
+
+
+def transform_x_axis(raw_x, mode, global_x_max, transform_scale):
+    """
+    Transform raw score values for display on the x-axis.
+
+    The histogram counts are still computed in raw score space. This function
+    only changes the displayed x coordinate of the bin edges.
+    """
+    raw_x = np.asarray(raw_x, dtype=float)
+    mode = str(mode).lower()
+
+    if mode == "none":
+        return raw_x
+
+    if not np.isfinite(global_x_max) or global_x_max <= 0.0:
+        raise ValueError(f"Bad global_x_max={global_x_max}; cannot transform x-axis.")
+
+    if mode == "global_max":
+        return raw_x / global_x_max
+
+    if transform_scale is None:
+        raise ValueError("transform_scale must be set for tanh/sigmoid transforms.")
+
+    if not np.isfinite(transform_scale) or transform_scale <= 0.0:
+        raise ValueError(f"Bad transform_scale={transform_scale}; cannot transform x-axis.")
+
+    if mode == "tanh":
+        denominator = np.tanh(global_x_max / transform_scale)
+        if not np.isfinite(denominator) or denominator <= 0.0:
+            raise ValueError(f"Bad tanh denominator={denominator}; cannot transform x-axis.")
+        return np.tanh(raw_x / transform_scale) / denominator
+
+    if mode == "sigmoid":
+        # Shift so x=0 maps to 0 instead of 0.5.
+        numerator = _stable_sigmoid(raw_x / transform_scale) - 0.5
+        denominator = _stable_sigmoid(global_x_max / transform_scale) - 0.5
+        if not np.isfinite(denominator) or denominator <= 0.0:
+            raise ValueError(f"Bad sigmoid denominator={denominator}; cannot transform x-axis.")
+        return numerator / denominator
+
+    raise ValueError(
+        f"Unknown x_axis_transform={mode!r}. Use 'none', 'global_max', 'tanh', or 'sigmoid'."
+    )
+
+
 def make_bin_edges(
     selected_values,
     bins=80,
@@ -260,6 +343,8 @@ def plot_hist_by_run(
     binning_mode="variable",
     tail_start_percentile=70,
     low_score_bin_fraction=0.75,
+    x_axis_transform="none",
+    x_transform_scale=None,
 ):
     """
     Plot per-run histograms as ROOT-style line histograms.
@@ -278,6 +363,19 @@ def plot_hist_by_run(
     if values.size == 0:
         print(f"No valid values found for {title}")
         return
+
+    # True maximum over the whole finite array, not the visible percentile.
+    # Used by global_max/tanh/sigmoid transforms so the whole-data maximum maps to 1.
+    global_x_max = np.nanmax(values)
+    x_axis_transform = str(x_axis_transform).lower()
+
+    if x_axis_transform != "none":
+        if not np.isfinite(global_x_max) or global_x_max <= 0.0:
+            print(
+                f"WARNING: cannot transform x-axis for {title}; "
+                f"bad global_x_max={global_x_max}; skipping."
+            )
+            return
 
     all_runs = sorted(np.unique(runs))
     selected_runs = resolve_runs_to_plot(all_runs, runs_to_plot)
@@ -305,6 +403,20 @@ def plot_hist_by_run(
 
     if bin_edges is None:
         print(f"WARNING: cannot determine valid bin edges for {title}; skipping.")
+        return
+
+    # For tanh/sigmoid, None means use the visible raw cutoff as the transform scale.
+    # This makes the visible percentile region readable even when the true max is huge.
+    transform_scale_used = x_transform_scale
+    if x_axis_transform in {"tanh", "sigmoid"} and transform_scale_used is None:
+        transform_scale_used = x_max
+
+    try:
+        x_min_plot = float(transform_x_axis(x_min, x_axis_transform, global_x_max, transform_scale_used))
+        x_max_plot = float(transform_x_axis(global_x_max, x_axis_transform, global_x_max, transform_scale_used))
+        x_visible_cutoff_plot = float(transform_x_axis(x_max, x_axis_transform, global_x_max, transform_scale_used))
+    except ValueError as exc:
+        print(f"WARNING: {exc}; skipping {title}.")
         return
 
     plt.figure(figsize=(12, 7))
@@ -363,8 +475,17 @@ def plot_hist_by_run(
         # For a true step histogram, x has length nbins+1 and y is extended by one.
         y_step = np.r_[y_values, y_values[-1]]
 
-        plt.step(
+        # Histogramming is done in the original score scale.
+        # Only the displayed x coordinates are transformed.
+        edges_to_plot = transform_x_axis(
             edges,
+            mode=x_axis_transform,
+            global_x_max=global_x_max,
+            transform_scale=transform_scale_used,
+        )
+
+        plt.step(
+            edges_to_plot,
             y_step,
             where="post",
             color=color,
@@ -379,7 +500,15 @@ def plot_hist_by_run(
         plt.close()
         return
 
-    plt.xlabel(xlabel)
+    if x_axis_transform == "none":
+        plt.xlabel(xlabel)
+    elif x_axis_transform == "global_max":
+        plt.xlabel(f"Normalized {xlabel} ({xlabel} / whole-data max)")
+    elif x_axis_transform == "tanh":
+        plt.xlabel(f"Tanh-transformed {xlabel}")
+    elif x_axis_transform == "sigmoid":
+        plt.xlabel(f"Sigmoid-transformed {xlabel}")
+
     plt.ylabel(ylabel)
 
     if binning_mode == "variable":
@@ -390,8 +519,19 @@ def plot_hist_by_run(
     else:
         title_extra = f"Shown up to {percentile}th percentile; linear bins"
 
-    plt.title(f"{title}\n{title_extra} (x_max = {x_max:.4g})")
-    plt.xlim(x_min, x_max)
+    if x_axis_transform == "none":
+        plt.title(f"{title}\n{title_extra} (raw x_max = {x_max:.4g})")
+        plt.xlim(x_min, x_max)
+    else:
+        scale_text = ""
+        if x_axis_transform in {"tanh", "sigmoid"}:
+            scale_text = f", scale = {transform_scale_used:.4g}"
+        plt.title(
+            f"{title}\n"
+            f"{title_extra}; x transform = {x_axis_transform}{scale_text} "
+            f"(raw cutoff = {x_max:.4g}, transformed cutoff = {x_visible_cutoff_plot:.4g})"
+        )
+        plt.xlim(x_min_plot, x_max_plot)
 
     plt.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=9)
     plt.tight_layout()
@@ -400,7 +540,13 @@ def plot_hist_by_run(
 
     print(f"Saved: {output_path}")
     print(f"  plotted runs = {selected_runs}")
-    print(f"  x_max ({percentile}th percentile of selected runs) = {x_max}")
+    print(f"  x_max ({percentile}th percentile of selected runs, raw scale) = {x_max}")
+    print(f"  global_x_max (whole finite array) = {global_x_max}")
+    print(f"  x_axis_transform = {x_axis_transform}")
+    if x_axis_transform in {"tanh", "sigmoid"}:
+        print(f"  x_transform_scale used = {transform_scale_used}")
+    if x_axis_transform != "none":
+        print(f"  transformed visible x cutoff = {x_visible_cutoff_plot}")
     print(f"  binning_mode = {binning_mode}")
     print(f"  number of bins = {len(bin_edges) - 1}")
 
@@ -451,6 +597,8 @@ plot_hist_by_run(
     binning_mode=binning_mode,
     tail_start_percentile=tail_start_percentile,
     low_score_bin_fraction=low_score_bin_fraction,
+    x_axis_transform=x_axis_transform,
+    x_transform_scale=x_transform_scale,
 )
 
 # ============================================================
@@ -470,4 +618,6 @@ plot_hist_by_run(
     binning_mode=binning_mode,
     tail_start_percentile=tail_start_percentile,
     low_score_bin_fraction=low_score_bin_fraction,
+    x_axis_transform=x_axis_transform,
+    x_transform_scale=x_transform_scale,
 )
