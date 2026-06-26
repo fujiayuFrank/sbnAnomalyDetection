@@ -1,0 +1,674 @@
+#!/usr/bin/env python3
+"""Evaluate GNN inference_scores.npz files with threshold-based good/bad prediction.
+
+Expected layout:
+
+    checkpoints/gnn/MODEL_NAME/inference_scores.npz
+
+Each NPZ should contain at least:
+
+    scores
+    scores_max
+    first_run
+
+For every model directory, this script:
+  1. reads inference_scores.npz
+  2. normalizes scores and scores_max with tanh or sigmoid
+  3. applies a threshold in [0, 1]
+  4. evaluates window-level predictions against known good/bad run labels
+  5. writes a compact per-model metrics CSV by default
+  6. writes detailed full/per-run CSV files only with --full-summary
+  7. optionally restricts output to scores-only or scores_max-only with CLI flags
+
+Definitions:
+  - true bad window: first_run is in bad_runs
+  - true good window: first_run is in good_runs
+  - predicted bad: normalized score > threshold
+  - predicted good: normalized score < threshold
+  - values exactly equal to threshold are controlled by equal_is_bad
+
+Confusion matrix convention:
+  TP = true bad, predicted bad
+  TN = true good, predicted good
+  FP = true good, predicted bad
+  FN = true bad, predicted good
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+from pathlib import Path
+from typing import Dict, Iterable, Literal
+
+import numpy as np
+
+
+# ============================================================
+# User settings
+# ============================================================
+
+CHECKPOINTS_GNN_DIR = Path("checkpoints/gnn")
+NPZ_NAME = "inference_scores.npz"
+
+OUTPUT_DIR = Path("threshold_evaluation")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Choose normalization transform.
+# Options: "tanh", "sigmoid", "global_max", "none"
+NORMALIZATION_MODE = "tanh"
+
+# Scope used to determine the transform scale.
+# "per_model": each model's scores are normalized using only that model's NPZ values.
+# "global": scores are normalized using all model NPZ values together.
+NORMALIZATION_SCOPE = "per_model"
+
+# Scale mode for tanh/sigmoid.
+# "max": use the maximum finite value as the scale reference.
+# "percentile": use NORMALIZATION_SCALE_PERCENTILE as the scale reference.
+# "manual": use MANUAL_SCORE_SCALE and MANUAL_SCORE_MAX_SCALE.
+NORMALIZATION_SCALE_MODE = "max"
+NORMALIZATION_SCALE_PERCENTILE = 99.0
+MANUAL_SCORE_SCALE = 1.0
+MANUAL_SCORE_MAX_SCALE = 1.0
+
+# After tanh/sigmoid transform, rescale so the largest finite value maps to 1.
+# This keeps the threshold range exactly meaningful as [0, 1].
+RESCALE_TRANSFORM_TO_UNIT_MAX = True
+
+# Classification threshold after normalization.
+# predicted bad if normalized value > THRESHOLD by default.
+THRESHOLD = 0.5
+
+# What to do with values exactly equal to the threshold.
+# False: value == threshold is predicted good.
+# True:  value == threshold is predicted bad.
+equal_is_bad = False
+
+# How to combine scores and scores_max for the "both" evaluation.
+# "or":   predicted bad if scores OR scores_max is above threshold.
+# "and":  predicted bad if scores AND scores_max are above threshold.
+# "mean": predicted bad if mean(scores, scores_max) is above threshold.
+# "max":  predicted bad if max(scores, scores_max) is above threshold.
+BOTH_RULE = "or"
+
+# Known labels from run number.
+good_runs = {
+    18445, 19724, 20141, 20142, 20144
+}
+
+bad_runs = {
+    19627, 19946, 20104
+}
+
+# Unknown runs are ignored by default because they cannot enter the confusion matrix.
+IGNORE_UNKNOWN_RUNS = True
+
+
+# ============================================================
+# Normalization helpers
+# ============================================================
+
+def finite_1d(a: np.ndarray) -> np.ndarray:
+    """Return finite values as a flattened float array."""
+    a = np.asarray(a, dtype=float).ravel()
+    return a[np.isfinite(a)]
+
+
+def safe_positive_scale(scale: float, fallback_values: np.ndarray, name: str) -> float:
+    """Make sure a transform scale is finite and positive."""
+    if np.isfinite(scale) and scale > 0:
+        return float(scale)
+
+    finite = finite_1d(fallback_values)
+    if finite.size > 0:
+        max_value = float(np.nanmax(finite))
+        if np.isfinite(max_value) and max_value > 0:
+            print(f"WARNING: bad {name} scale={scale}; falling back to max={max_value}")
+            return max_value
+
+    print(f"WARNING: bad {name} scale={scale}; falling back to 1.0")
+    return 1.0
+
+
+def stable_sigmoid_shifted(z: np.ndarray) -> np.ndarray:
+    """Shifted sigmoid mapping z>=0 approximately to [0, 1)."""
+    z = np.asarray(z, dtype=float)
+    z_clip = np.clip(z, -700, 700)
+    return 2.0 / (1.0 + np.exp(-z_clip)) - 1.0
+
+
+def transform_to_0_1(
+    values: np.ndarray,
+    *,
+    mode: str,
+    scale: float,
+    reference_max: float,
+    rescale_to_unit_max: bool = True,
+) -> np.ndarray:
+    """Normalize values to a [0, 1]-like score.
+
+    For nonnegative anomaly scores:
+      - global_max: x / reference_max
+      - tanh: tanh(x / scale), optionally divided by tanh(reference_max / scale)
+      - sigmoid: 2*sigmoid(x / scale)-1, optionally divided by transform(reference_max)
+
+    The optional final division makes the largest reference value map to exactly 1.
+    """
+    x = np.asarray(values, dtype=float)
+    out = np.full_like(x, np.nan, dtype=float)
+    finite_mask = np.isfinite(x)
+
+    if not np.any(finite_mask):
+        return out
+
+    scale = safe_positive_scale(scale, x[finite_mask], "normalization")
+    reference_max = safe_positive_scale(reference_max, x[finite_mask], "reference_max")
+
+    xf = x[finite_mask]
+
+    if mode == "none":
+        transformed = xf.copy()
+        denom = 1.0
+    elif mode == "global_max":
+        transformed = xf / reference_max
+        denom = 1.0
+    elif mode == "tanh":
+        transformed = np.tanh(xf / scale)
+        denom = np.tanh(reference_max / scale) if rescale_to_unit_max else 1.0
+    elif mode == "sigmoid":
+        transformed = stable_sigmoid_shifted(xf / scale)
+        denom = stable_sigmoid_shifted(np.asarray([reference_max / scale]))[0] if rescale_to_unit_max else 1.0
+    else:
+        raise ValueError(
+            f"Unknown NORMALIZATION_MODE={mode!r}. "
+            "Use 'tanh', 'sigmoid', 'global_max', or 'none'."
+        )
+
+    if not np.isfinite(denom) or denom <= 0:
+        denom = 1.0
+
+    transformed = transformed / denom
+
+    # Small numerical overshoots can happen after the division.
+    if mode != "none":
+        transformed = np.clip(transformed, 0.0, 1.0)
+
+    out[finite_mask] = transformed
+    return out
+
+
+def choose_scale(values: np.ndarray, *, scale_mode: str, percentile: float, manual_scale: float) -> float:
+    finite = finite_1d(values)
+    if finite.size == 0:
+        return 1.0
+
+    if scale_mode == "max":
+        return float(np.nanmax(finite))
+    if scale_mode == "percentile":
+        return float(np.nanpercentile(finite, percentile))
+    if scale_mode == "manual":
+        return float(manual_scale)
+
+    raise ValueError(
+        f"Unknown NORMALIZATION_SCALE_MODE={scale_mode!r}. "
+        "Use 'max', 'percentile', or 'manual'."
+    )
+
+
+def predict_bad(normalized_values: np.ndarray, threshold: float, *, equal_is_bad: bool) -> np.ndarray:
+    """Return boolean predicted-bad mask."""
+    if equal_is_bad:
+        return normalized_values >= threshold
+    return normalized_values > threshold
+
+
+# ============================================================
+# Evaluation helpers
+# ============================================================
+
+def confusion_and_metrics(y_true_bad: np.ndarray, y_pred_bad: np.ndarray) -> Dict[str, float]:
+    """Compute confusion matrix and derived metrics."""
+    y_true_bad = np.asarray(y_true_bad, dtype=bool)
+    y_pred_bad = np.asarray(y_pred_bad, dtype=bool)
+
+    tp = int(np.sum(y_true_bad & y_pred_bad))
+    tn = int(np.sum((~y_true_bad) & (~y_pred_bad)))
+    fp = int(np.sum((~y_true_bad) & y_pred_bad))
+    fn = int(np.sum(y_true_bad & (~y_pred_bad)))
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else math.nan
+    recall = tp / (tp + fn) if (tp + fn) > 0 else math.nan
+    f1 = 2 * precision * recall / (precision + recall) if np.isfinite(precision) and np.isfinite(recall) and (precision + recall) > 0 else math.nan
+    accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else math.nan
+
+    # Useful rates by true class.
+    bad_run_pred_bad_ratio = recall
+    good_run_pred_bad_ratio = fp / (fp + tn) if (fp + tn) > 0 else math.nan
+    bad_run_pred_good_ratio = fn / (tp + fn) if (tp + fn) > 0 else math.nan
+    good_run_pred_good_ratio = tn / (fp + tn) if (fp + tn) > 0 else math.nan
+
+    return {
+        "TP": tp,
+        "TN": tn,
+        "FP": fp,
+        "FN": fn,
+        "precision": precision,
+        "recall": recall,
+        "F1": f1,
+        "accuracy": accuracy,
+        "true_bad_pred_bad_ratio": bad_run_pred_bad_ratio,
+        "true_bad_pred_good_ratio": bad_run_pred_good_ratio,
+        "true_good_pred_bad_ratio": good_run_pred_bad_ratio,
+        "true_good_pred_good_ratio": good_run_pred_good_ratio,
+    }
+
+
+def build_true_labels(first_run: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return y_true_bad and known-label mask."""
+    runs = np.asarray(first_run).astype(int)
+    is_good = np.isin(runs, list(good_runs))
+    is_bad = np.isin(runs, list(bad_runs))
+    known = is_good | is_bad
+    y_true_bad = is_bad
+    return y_true_bad, known
+
+
+def combine_predictions(
+    pred_score_bad: np.ndarray,
+    pred_score_max_bad: np.ndarray,
+    norm_score: np.ndarray,
+    norm_score_max: np.ndarray,
+    threshold: float,
+    *,
+    both_rule: str,
+    equal_is_bad: bool,
+) -> np.ndarray:
+    """Combine scores and scores_max into a single predicted-bad mask."""
+    both_rule = both_rule.lower()
+
+    if both_rule == "or":
+        return pred_score_bad | pred_score_max_bad
+    if both_rule == "and":
+        return pred_score_bad & pred_score_max_bad
+    if both_rule == "mean":
+        mean_value = 0.5 * (norm_score + norm_score_max)
+        return predict_bad(mean_value, threshold, equal_is_bad=equal_is_bad)
+    if both_rule == "max":
+        max_value = np.maximum(norm_score, norm_score_max)
+        return predict_bad(max_value, threshold, equal_is_bad=equal_is_bad)
+
+    raise ValueError("BOTH_RULE must be one of: 'or', 'and', 'mean', 'max'")
+
+
+# ============================================================
+# File discovery and main loop
+# ============================================================
+
+def find_npz_files(checkpoints_dir: Path, npz_name: str) -> list[Path]:
+    """Find checkpoints/gnn/MODEL_NAME/inference_scores.npz files."""
+    if not checkpoints_dir.exists():
+        raise FileNotFoundError(f"Directory does not exist: {checkpoints_dir}")
+
+    npz_files = []
+    for child in sorted(checkpoints_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        npz_path = child / npz_name
+        if npz_path.exists():
+            npz_files.append(npz_path)
+
+    return npz_files
+
+
+def load_required_arrays(npz_path: Path) -> dict[str, np.ndarray]:
+    data = np.load(npz_path, allow_pickle=True)
+    required = ["scores", "scores_max", "first_run"]
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise KeyError(f"{npz_path} is missing required keys: {missing}")
+
+    scores = np.asarray(data["scores"], dtype=float).ravel()
+    scores_max = np.asarray(data["scores_max"], dtype=float).ravel()
+    first_run = np.asarray(data["first_run"]).ravel()
+
+    if not (scores.shape == scores_max.shape == first_run.shape):
+        raise ValueError(
+            f"Shape mismatch in {npz_path}: "
+            f"scores={scores.shape}, scores_max={scores_max.shape}, first_run={first_run.shape}"
+        )
+
+    return {
+        "scores": scores,
+        "scores_max": scores_max,
+        "first_run": first_run,
+    }
+
+
+def write_csv(path: Path, rows: list[dict], fieldnames: Iterable[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(fieldnames))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluate checkpoints/gnn/*/inference_scores.npz with threshold-based good/bad prediction."
+    )
+    parser.add_argument(
+        "--full-summary",
+        action="store_true",
+        help=(
+            "Also write the full detailed CSV files. By default, only a compact "
+            "summary CSV is written."
+        ),
+    )
+
+    method_group = parser.add_mutually_exclusive_group()
+    method_group.add_argument(
+        "--scores-only",
+        action="store_true",
+        help=(
+            "Only evaluate and store the scores_only method. "
+            "If neither --scores-only nor --scores-max-only is given, all methods are evaluated."
+        ),
+    )
+    method_group.add_argument(
+        "--scores-max-only",
+        action="store_true",
+        help=(
+            "Only evaluate and store the scores_max_only method. "
+            "If neither --scores-only nor --scores-max-only is given, all methods are evaluated."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    if not (0.0 <= THRESHOLD <= 1.0):
+        raise ValueError("THRESHOLD must be between 0 and 1")
+
+    npz_files = find_npz_files(CHECKPOINTS_GNN_DIR, NPZ_NAME)
+    if not npz_files:
+        print(f"No {NPZ_NAME} files found under {CHECKPOINTS_GNN_DIR}")
+        return 1
+
+    print("=" * 80)
+    print(f"Found {len(npz_files)} NPZ files under {CHECKPOINTS_GNN_DIR}")
+    print(f"NORMALIZATION_MODE        = {NORMALIZATION_MODE}")
+    print(f"NORMALIZATION_SCOPE       = {NORMALIZATION_SCOPE}")
+    print(f"NORMALIZATION_SCALE_MODE  = {NORMALIZATION_SCALE_MODE}")
+    print(f"THRESHOLD                 = {THRESHOLD}")
+    if args.scores_only:
+        method_selection = "scores_only"
+    elif args.scores_max_only:
+        method_selection = "scores_max_only"
+    else:
+        method_selection = "all: scores_only, scores_max_only, both"
+
+    print(f"BOTH_RULE                 = {BOTH_RULE}")
+    print(f"METHOD_SELECTION          = {method_selection}")
+    print("=" * 80)
+
+    loaded = {}
+    for npz_path in npz_files:
+        model_name = npz_path.parent.name
+        try:
+            loaded[model_name] = load_required_arrays(npz_path)
+        except Exception as exc:
+            print(f"WARNING: failed to load {npz_path}: {exc}")
+
+    if not loaded:
+        print("No valid NPZ files loaded.")
+        return 1
+
+    # Global scales are computed once if requested.
+    if NORMALIZATION_SCOPE == "global":
+        all_scores = np.concatenate([d["scores"] for d in loaded.values()])
+        all_scores_max = np.concatenate([d["scores_max"] for d in loaded.values()])
+        global_score_scale = choose_scale(
+            all_scores,
+            scale_mode=NORMALIZATION_SCALE_MODE,
+            percentile=NORMALIZATION_SCALE_PERCENTILE,
+            manual_scale=MANUAL_SCORE_SCALE,
+        )
+        global_score_max_scale = choose_scale(
+            all_scores_max,
+            scale_mode=NORMALIZATION_SCALE_MODE,
+            percentile=NORMALIZATION_SCALE_PERCENTILE,
+            manual_scale=MANUAL_SCORE_MAX_SCALE,
+        )
+        global_score_ref_max = safe_positive_scale(np.nanmax(finite_1d(all_scores)), all_scores, "global_score_ref_max")
+        global_score_max_ref_max = safe_positive_scale(np.nanmax(finite_1d(all_scores_max)), all_scores_max, "global_score_max_ref_max")
+    elif NORMALIZATION_SCOPE == "per_model":
+        global_score_scale = global_score_max_scale = None
+        global_score_ref_max = global_score_max_ref_max = None
+    else:
+        raise ValueError("NORMALIZATION_SCOPE must be 'per_model' or 'global'")
+
+    summary_rows = []
+    run_rows = []
+
+    for model_name, arrays in loaded.items():
+        scores = arrays["scores"]
+        scores_max = arrays["scores_max"]
+        first_run = arrays["first_run"].astype(int)
+
+        finite_mask = np.isfinite(scores) & np.isfinite(scores_max) & np.isfinite(first_run)
+        scores = scores[finite_mask]
+        scores_max = scores_max[finite_mask]
+        first_run = first_run[finite_mask]
+
+        y_true_bad, known_mask = build_true_labels(first_run)
+        if IGNORE_UNKNOWN_RUNS:
+            eval_mask = known_mask
+        else:
+            eval_mask = np.ones_like(known_mask, dtype=bool)
+
+        if not np.any(eval_mask):
+            print(f"WARNING: {model_name}: no known good/bad runs found; skipping metrics.")
+            continue
+
+        if NORMALIZATION_SCOPE == "per_model":
+            score_scale = choose_scale(
+                scores,
+                scale_mode=NORMALIZATION_SCALE_MODE,
+                percentile=NORMALIZATION_SCALE_PERCENTILE,
+                manual_scale=MANUAL_SCORE_SCALE,
+            )
+            score_max_scale = choose_scale(
+                scores_max,
+                scale_mode=NORMALIZATION_SCALE_MODE,
+                percentile=NORMALIZATION_SCALE_PERCENTILE,
+                manual_scale=MANUAL_SCORE_MAX_SCALE,
+            )
+            score_ref_max = safe_positive_scale(np.nanmax(finite_1d(scores)), scores, "score_ref_max")
+            score_max_ref_max = safe_positive_scale(np.nanmax(finite_1d(scores_max)), scores_max, "score_max_ref_max")
+        else:
+            score_scale = global_score_scale
+            score_max_scale = global_score_max_scale
+            score_ref_max = global_score_ref_max
+            score_max_ref_max = global_score_max_ref_max
+
+        norm_scores = transform_to_0_1(
+            scores,
+            mode=NORMALIZATION_MODE,
+            scale=score_scale,
+            reference_max=score_ref_max,
+            rescale_to_unit_max=RESCALE_TRANSFORM_TO_UNIT_MAX,
+        )
+        norm_scores_max = transform_to_0_1(
+            scores_max,
+            mode=NORMALIZATION_MODE,
+            scale=score_max_scale,
+            reference_max=score_max_ref_max,
+            rescale_to_unit_max=RESCALE_TRANSFORM_TO_UNIT_MAX,
+        )
+
+        pred_score_bad = predict_bad(norm_scores, THRESHOLD, equal_is_bad=equal_is_bad)
+        pred_score_max_bad = predict_bad(norm_scores_max, THRESHOLD, equal_is_bad=equal_is_bad)
+        pred_both_bad = combine_predictions(
+            pred_score_bad,
+            pred_score_max_bad,
+            norm_scores,
+            norm_scores_max,
+            THRESHOLD,
+            both_rule=BOTH_RULE,
+            equal_is_bad=equal_is_bad,
+        )
+
+        if args.scores_only:
+            evals = {
+                "scores_only": pred_score_bad,
+            }
+        elif args.scores_max_only:
+            evals = {
+                "scores_max_only": pred_score_max_bad,
+            }
+        else:
+            evals = {
+                "scores_only": pred_score_bad,
+                "scores_max_only": pred_score_max_bad,
+                f"both_{BOTH_RULE}": pred_both_bad,
+            }
+
+        for method, pred_bad in evals.items():
+            metrics = confusion_and_metrics(y_true_bad[eval_mask], pred_bad[eval_mask])
+            row = {
+                "model_name": model_name,
+                "method": method,
+                "threshold": THRESHOLD,
+                "normalization_mode": NORMALIZATION_MODE,
+                "normalization_scope": NORMALIZATION_SCOPE,
+                "normalization_scale_mode": NORMALIZATION_SCALE_MODE,
+                "score_scale": score_scale,
+                "score_max_scale": score_max_scale,
+                "score_reference_max": score_ref_max,
+                "score_max_reference_max": score_max_ref_max,
+                "n_windows_total": int(scores.size),
+                "n_windows_evaluated": int(np.sum(eval_mask)),
+                "n_true_good_windows": int(np.sum((~y_true_bad) & eval_mask)),
+                "n_true_bad_windows": int(np.sum(y_true_bad & eval_mask)),
+                **metrics,
+            }
+            summary_rows.append(row)
+
+        # Per-run ratios for debugging and sanity checks.
+        for run in sorted(np.unique(first_run[eval_mask])):
+            run_mask = eval_mask & (first_run == run)
+            true_label = "bad" if run in bad_runs else "good" if run in good_runs else "unknown"
+            if not np.any(run_mask):
+                continue
+
+            for method, pred_bad in evals.items():
+                n = int(np.sum(run_mask))
+                n_pred_bad = int(np.sum(pred_bad[run_mask]))
+                n_pred_good = n - n_pred_bad
+                run_rows.append({
+                    "model_name": model_name,
+                    "run": int(run),
+                    "true_label": true_label,
+                    "method": method,
+                    "n_windows": n,
+                    "n_pred_bad": n_pred_bad,
+                    "n_pred_good": n_pred_good,
+                    "pred_bad_ratio": n_pred_bad / n if n > 0 else math.nan,
+                    "pred_good_ratio": n_pred_good / n if n > 0 else math.nan,
+                })
+
+        print(f"Processed {model_name}: evaluated {int(np.sum(eval_mask))} known-label windows")
+
+    if not summary_rows:
+        print("No summary rows produced.")
+        return 1
+
+    # Compact summary: this is always written.
+    # It contains only the columns needed for model/method ranking.
+    compact_summary_fields = [
+        "model_name",
+        "method",
+        "normalization_model",
+        "TP", "TN", "FP", "FN",
+        "precision", "recall", "F1", "accuracy",
+    ]
+
+    # Full summary: only written when --full-summary is passed.
+    full_summary_fields = [
+        "model_name", "method", "threshold",
+        "normalization_mode", "normalization_scope", "normalization_scale_mode",
+        "score_scale", "score_max_scale", "score_reference_max", "score_max_reference_max",
+        "n_windows_total", "n_windows_evaluated", "n_true_good_windows", "n_true_bad_windows",
+        "TP", "TN", "FP", "FN",
+        "precision", "recall", "F1", "accuracy",
+        "true_bad_pred_bad_ratio", "true_bad_pred_good_ratio",
+        "true_good_pred_bad_ratio", "true_good_pred_good_ratio",
+    ]
+    run_fields = [
+        "model_name", "run", "true_label", "method", "n_windows",
+        "n_pred_bad", "n_pred_good", "pred_bad_ratio", "pred_good_ratio",
+    ]
+
+    # Convert the internal field name normalization_mode to the requested output
+    # header normalization_model in the compact CSV.
+    compact_rows = []
+    for row in summary_rows:
+        compact_rows.append({
+            "model_name": row["model_name"],
+            "method": row["method"],
+            "normalization_model": row["normalization_mode"],
+            "TP": row["TP"],
+            "TN": row["TN"],
+            "FP": row["FP"],
+            "FN": row["FN"],
+            "precision": row["precision"],
+            "recall": row["recall"],
+            "F1": row["F1"],
+            "accuracy": row["accuracy"],
+        })
+
+    compact_summary_csv = OUTPUT_DIR / "threshold_metrics_summary.csv"
+    write_csv(compact_summary_csv, compact_rows, compact_summary_fields)
+
+    full_summary_csv = OUTPUT_DIR / "threshold_metrics_full_summary.csv"
+    run_csv = OUTPUT_DIR / "threshold_per_run_ratios.csv"
+
+    if args.full_summary:
+        write_csv(full_summary_csv, summary_rows, full_summary_fields)
+        write_csv(run_csv, run_rows, run_fields)
+
+    # Also print the best models by F1 for each method.
+    print("\n" + "=" * 80)
+    print(f"Saved compact summary CSV: {compact_summary_csv}")
+    if args.full_summary:
+        print(f"Saved full summary CSV: {full_summary_csv}")
+        print(f"Saved per-run CSV: {run_csv}")
+    else:
+        print("Skipped full summary/per-run CSVs. Use --full-summary to write them.")
+    print("=" * 80)
+
+    for method in sorted(set(row["method"] for row in summary_rows)):
+        method_rows = [row for row in summary_rows if row["method"] == method]
+        method_rows = [row for row in method_rows if np.isfinite(row["F1"])]
+        method_rows.sort(key=lambda r: r["F1"], reverse=True)
+        print(f"\nTop models by F1 for {method}:")
+        for row in method_rows[:10]:
+            print(
+                f"  {row['model_name']:30s} "
+                f"F1={row['F1']:.4f} "
+                f"precision={row['precision']:.4f} "
+                f"recall={row['recall']:.4f} "
+                f"TP={row['TP']} TN={row['TN']} FP={row['FP']} FN={row['FN']}"
+            )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
