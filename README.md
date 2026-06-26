@@ -84,6 +84,7 @@ sbnAnomalyDetection/
 │       └── ...
 ├── config_maker.py                     # Generate sweep/tuning YAML configs
 ├── run_gnn_sweep.py                    # Run GNN sweep configs and track results
+├── evaluate_gnn_sweep.py               # Evaluate per-model inference_scores.npz threshold metrics
 ├── run_materialize_windows.sh          # Bash wrapper for materializing windows/events
 ├── run_multi_branch_inference.py       # Multi-branch inference runner
 ├── npz_npy_reader.py                   # Inspect .npz/.npy files
@@ -271,6 +272,94 @@ When running through `nohup`, output is usually redirected to a file instead of 
 nohup python run_gnn_sweep.py > gnn_sweep.log 2>&1 &
 tail -f gnn_sweep.log
 ```
+
+### Evaluating GNN sweep inference results
+
+After a sweep has produced per-model inference outputs, use the top-level `evaluate_gnn_sweep.py` script to compare models with a fixed anomaly threshold. The script scans model directories under:
+
+```text
+checkpoints/gnn/<model_name>/inference_scores.npz
+```
+
+Model directories without `inference_scores.npz` are skipped automatically. Each NPZ must contain at least:
+
+```text
+scores
+scores_max
+first_run
+```
+
+The script normalizes `scores` and `scores_max`, applies a threshold in `[0, 1]`, and compares the predicted good/bad window labels against the known run labels:
+
+```python
+good_runs = {18445, 19724, 20141, 20142, 20144}
+bad_runs = {19627, 19946, 20104}
+```
+
+Confusion matrix convention:
+
+| Term | Meaning |
+|------|---------|
+| `TP` | True bad run window predicted bad |
+| `TN` | True good run window predicted good |
+| `FP` | True good run window predicted bad |
+| `FN` | True bad run window predicted good |
+
+The compact output is written by default to:
+
+```text
+threshold_evaluation/threshold_metrics_summary.csv
+```
+
+with the columns:
+
+```text
+model_name, method, normalization_model, TP, TN, FP, FN, precision, recall, F1, accuracy
+```
+
+Typical usage:
+
+```bash
+python evaluate_gnn_sweep.py
+```
+
+By default, all three evaluation methods are included:
+
+| Method | Meaning |
+|--------|---------|
+| `scores_only` | Use only the normalized `scores` array |
+| `scores_max_only` | Use only the normalized `scores_max` array |
+| `both_or` | Predict bad if either `scores` or `scores_max` is above threshold |
+
+To export only one score mode:
+
+```bash
+python evaluate_gnn_sweep.py --scores-only
+python evaluate_gnn_sweep.py --scores-max-only
+```
+
+To also write the detailed summary and per-run ratios, pass `--full-summary`:
+
+```bash
+python evaluate_gnn_sweep.py --full-summary
+```
+
+This additionally writes:
+
+```text
+threshold_evaluation/threshold_metrics_full_summary.csv
+threshold_evaluation/threshold_per_run_ratios.csv
+```
+
+Important top-level settings in the script:
+
+| Setting | Meaning |
+|---------|---------|
+| `NORMALIZATION_MODE` | Score transform: `tanh`, `sigmoid`, `global_max`, or `none` |
+| `NORMALIZATION_SCOPE` | Use per-model or global normalization scale |
+| `NORMALIZATION_SCALE_MODE` | Use max, percentile, or manual scale |
+| `THRESHOLD` | Anomaly threshold after normalization, in `[0, 1]` |
+| `BOTH_RULE` | How to combine `scores` and `scores_max`: `or`, `and`, `mean`, or `max` |
 
 #### Sweep config format
 
