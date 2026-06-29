@@ -52,6 +52,11 @@ Available command-line flags:
         thresholds for one model before moving to the next model. With this flag,
         it evaluates all models for one threshold before moving to the next threshold.
 
+    --start N
+        Only evaluate/plot model directories whose leading numeric prefix is
+        greater than or equal to N. This overrides MODEL_START_INDEX set in this
+        script. Example: --start 81 uses 0081_..., 0082_..., etc.
+
     --with-plot
         After writing threshold_metrics_summary.csv, run the plotting script located
         in the graphing/ directory relative to this script.
@@ -65,6 +70,7 @@ Notes:
         both_<BOTH_RULE>
   - If no rank flag is given, rows are written in the selected scan/order sequence.
   - --threshold-first only changes row order when no rank flag is used.
+  - --start takes priority over MODEL_START_INDEX.
 
 Example usage:
 
@@ -75,6 +81,8 @@ Example usage:
     python evaluate_gnn_sweep.py --scores-only --f1-rank
     python evaluate_gnn_sweep.py --full-summary --accuracy-rank
     python evaluate_gnn_sweep.py --threshold-first
+    python evaluate_gnn_sweep.py --start 81
+    python evaluate_gnn_sweep.py --start 81 --with-plot
 
 Definitions:
   - true bad window: first_run is in bad_runs
@@ -109,6 +117,12 @@ import numpy as np
 
 CHECKPOINTS_GNN_DIR = Path("checkpoints/gnn")
 NPZ_NAME = "inference_scores.npz"
+
+# Only evaluate/plot model directories whose numeric prefix is >= this value.
+# Example:
+#   MODEL_START_INDEX = None  -> use all model directories
+#   MODEL_START_INDEX = 81    -> use 0081_..., 0082_..., ..., 0160_...
+MODEL_START_INDEX: int | None = None
 
 OUTPUT_DIR = Path("threshold_evaluation")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -370,18 +384,59 @@ def combine_predictions(
 
 
 # ============================================================
+# Helpers for run names, config dicts, and model directory discovery
+# ============================================================
+
+def get_model_index(model_dir_name: str) -> int | None:
+    """
+    Extract the leading numeric model index from a model directory name.
+
+    Examples:
+        0000_win20_stride10_hist1 -> 0
+        0081_win100_stride10_hist1 -> 81
+        test_model -> None
+    """
+    prefix = model_dir_name.split("_", 1)[0]
+
+    if not prefix.isdigit():
+        return None
+
+    return int(prefix)
+
+
+# ============================================================
 # File discovery and main loop
 # ============================================================
 
-def find_npz_files(checkpoints_dir: Path, npz_name: str) -> list[Path]:
+def find_npz_files(
+    checkpoints_dir: Path,
+    npz_name: str,
+    *,
+    model_start_index: int | None = None,
+) -> list[Path]:
     """Find checkpoints/gnn/MODEL_NAME/inference_scores.npz files."""
     if not checkpoints_dir.exists():
         raise FileNotFoundError(f"Directory does not exist: {checkpoints_dir}")
 
     npz_files = []
+
     for child in sorted(checkpoints_dir.iterdir()):
         if not child.is_dir():
             continue
+
+        model_index = get_model_index(child.name)
+
+        if model_start_index is not None:
+            if model_index is None:
+                print(
+                    f"Skipping {child.name}: cannot read numeric prefix "
+                    f"while RESOLVED_START_INDEX={model_start_index}"
+                )
+                continue
+
+            if model_index < model_start_index:
+                continue
+
         npz_path = child / npz_name
         if npz_path.exists():
             npz_files.append(npz_path)
@@ -411,6 +466,20 @@ def load_required_arrays(npz_path: Path) -> dict[str, np.ndarray]:
         "scores_max": scores_max,
         "first_run": first_run,
     }
+
+
+def write_empty_compact_summary_csv(path: Path) -> None:
+    """Write an empty compact summary CSV so old results are not accidentally reused."""
+    compact_summary_fields = [
+        "model_name",
+        "method",
+        "threshold",
+        "normalization_model",
+        "TP", "TN", "FP", "FN",
+        "precision", "recall", "F1", "accuracy",
+    ]
+
+    write_csv(path, [], compact_summary_fields)
 
 
 def write_csv(path: Path, rows: list[dict], fieldnames: Iterable[str]) -> None:
@@ -481,6 +550,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--with-plot",
         "--with_plot",
+        "--with-plots",
+        "--with_plots",
         action="store_true",
         help=(
             "After writing the compact summary CSV, run the plotting script in the "
@@ -495,6 +566,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Only used with --with-plot. Forward --plot-summary to the plotting "
             "script so it also writes its own plot summary CSV files."
+        ),
+    )
+    parser.add_argument(
+        "--start",
+        type=int,
+        default=None,
+        help=(
+            "Only evaluate/plot model directories whose leading numeric prefix is "
+            "greater than or equal to this value. This overrides MODEL_START_INDEX "
+            "set in the script. Example: --start 81 uses 0081_..., 0082_..., etc."
         ),
     )
 
@@ -544,6 +625,26 @@ def parse_args() -> argparse.Namespace:
         help="Sort output CSV rows by accuracy from high to low.",
     )
     return parser.parse_args()
+
+
+def resolve_model_start_index(args: argparse.Namespace) -> int | None:
+    """
+    Decide which model index to start from.
+
+    Priority:
+      1. --start command-line argument
+      2. MODEL_START_INDEX variable in this script
+      3. None, meaning no filtering
+    """
+    if args.start is not None:
+        if args.start < 0:
+            raise ValueError(f"--start must be >= 0; got {args.start}")
+        return args.start
+
+    if MODEL_START_INDEX is not None and MODEL_START_INDEX < 0:
+        raise ValueError(f"MODEL_START_INDEX must be >= 0; got {MODEL_START_INDEX}")
+
+    return MODEL_START_INDEX
 
 
 def selected_rank_metric(args: argparse.Namespace) -> str | None:
@@ -799,14 +900,38 @@ def append_metrics_for_model_threshold(
 def main() -> int:
     args = parse_args()
     thresholds = get_thresholds()
+    model_start_index = resolve_model_start_index(args)
 
-    npz_files = find_npz_files(CHECKPOINTS_GNN_DIR, NPZ_NAME)
+    npz_files = find_npz_files(
+        CHECKPOINTS_GNN_DIR,
+        NPZ_NAME,
+        model_start_index=model_start_index,
+    )
+
     if not npz_files:
-        print(f"No {NPZ_NAME} files found under {CHECKPOINTS_GNN_DIR}")
-        return 1
+        compact_summary_csv = OUTPUT_DIR / "threshold_metrics_summary.csv"
+        write_empty_compact_summary_csv(compact_summary_csv)
+
+        print("=" * 80)
+        print("WARNING: no model directories matched the requested model-start filter.")
+        print(f"CHECKPOINTS_GNN_DIR       = {CHECKPOINTS_GNN_DIR}")
+        print(f"NPZ_NAME                  = {NPZ_NAME}")
+        print(f"MODEL_START_INDEX         = {MODEL_START_INDEX}")
+        print(f"--start                   = {args.start}")
+        print(f"RESOLVED_START_INDEX      = {model_start_index}")
+        print()
+        print(f"Wrote empty summary CSV: {compact_summary_csv}")
+        print("No metrics were evaluated.")
+        print("No plots were produced.")
+        print("=" * 80)
+
+        return 0
 
     print("=" * 80)
     print(f"Found {len(npz_files)} NPZ files under {CHECKPOINTS_GNN_DIR}")
+    print(f"MODEL_START_INDEX         = {MODEL_START_INDEX}")
+    print(f"--start                   = {args.start}")
+    print(f"RESOLVED_START_INDEX      = {model_start_index}")
     print(f"NORMALIZATION_MODE        = {NORMALIZATION_MODE}")
     print(f"NORMALIZATION_SCOPE       = {NORMALIZATION_SCOPE}")
     print(f"NORMALIZATION_SCALE_MODE  = {NORMALIZATION_SCALE_MODE}")

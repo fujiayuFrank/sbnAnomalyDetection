@@ -16,15 +16,26 @@ BASE_YAML_PATH = Path("configs/gnn.yaml")
 # Directory where generated YAML files will be saved
 OUTPUT_YAML_DIR = Path("tuning_configs/gnn_sweep")
 
-# Parameter values to sweep
-WINDOW_SIZES = [20, 50, 70, 100]
-STRIDES = [10, 20, 30, 40, 50, 70, 100]
-HISTORIES = [1, 2, 6, 10]
+# Starting index for generated YAML names.
+# Example:
+#   START_INDEX = 0    -> 0000_win20_stride10_hist1_bs64_lr0p003.yaml
+#   START_INDEX = 81   -> 0081_win20_stride10_hist1_bs64_lr0p003.yaml
+START_INDEX = 81
 
-# Default training settings to apply to every generated YAML
-DEFAULT_LR = 0.003
+# Parameter values to sweep
+WINDOW_SIZES = [200, 500, 700, 1000]
+STRIDES = [200, 500, 700, 1000]
+HISTORIES = [1, 10, 15, 20]
+
+# Paired training settings.
+# These are iterated pair by pair:
+#   BATCH_SIZES[0] uses LEARNING_RATES[0]
+#   BATCH_SIZES[1] uses LEARNING_RATES[1]
+#   etc.
+BATCH_SIZES = [64]
+LEARNING_RATES = [0.003]
+
 DEFAULT_WEIGHT_DECAY = 1.0e-4
-DEFAULT_BATCH_SIZE = 64
 DEFAULT_MAX_EPOCHS = 100
 
 # Name prefix for generated runs
@@ -61,12 +72,51 @@ def save_yaml(config: dict, path: Path) -> None:
         )
 
 
-def make_run_name(index: int, window_size: int, stride: int, history: int) -> str:
+def format_float_for_name(value: float) -> str:
+    """
+    Convert a float to a filename-safe string.
+
+    Examples:
+        0.003 -> 0p003
+        0.001 -> 0p001
+        1e-4 -> 0p0001
+    """
+    text = f"{value:g}"
+    text = text.replace(".", "p")
+    text = text.replace("-", "m")
+    return text
+
+
+def validate_training_sweep_lists() -> None:
+    if len(BATCH_SIZES) != len(LEARNING_RATES):
+        raise ValueError(
+            "BATCH_SIZES and LEARNING_RATES must have the same length because "
+            "they are iterated pair by pair.\n"
+            f"len(BATCH_SIZES) = {len(BATCH_SIZES)}\n"
+            f"len(LEARNING_RATES) = {len(LEARNING_RATES)}"
+        )
+
+    if len(BATCH_SIZES) == 0:
+        raise ValueError("BATCH_SIZES and LEARNING_RATES cannot be empty.")
+
+
+def make_run_name(
+    index: int,
+    window_size: int,
+    stride: int,
+    history: int,
+    batch_size: int,
+    lr: float,
+) -> str:
+    lr_name = format_float_for_name(lr)
+
     return (
         f"{index:04d}_"
         f"win{window_size}_"
         f"stride{stride}_"
-        f"hist{history}"
+        f"hist{history}_"
+        f"bs{batch_size}_"
+        f"lr{lr_name}"
     )
 
 
@@ -76,6 +126,8 @@ def make_config(
     window_size: int,
     stride: int,
     history: int,
+    batch_size: int,
+    lr: float,
 ) -> dict:
     cfg = copy.deepcopy(base_config)
 
@@ -92,11 +144,12 @@ def make_config(
     # Vary model history
     cfg["model"]["history"] = history
 
-    # Apply default training settings
-    cfg["training"]["lr"] = DEFAULT_LR
+    # Apply training settings
+    cfg["training"]["lr"] = lr
     cfg["training"]["weight_decay"] = DEFAULT_WEIGHT_DECAY
-    cfg["training"]["batch_size"] = DEFAULT_BATCH_SIZE
+    cfg["training"]["batch_size"] = batch_size
     cfg["training"]["max_epochs"] = DEFAULT_MAX_EPOCHS
+
     # Give each run its own checkpoint directory
     checkpoint_dir = CHECKPOINT_BASE_DIR / run_name
 
@@ -111,18 +164,31 @@ def make_config(
 
 
 def main() -> None:
+    validate_training_sweep_lists()
+
     OUTPUT_YAML_DIR.mkdir(parents=True, exist_ok=True)
 
     base_config = load_yaml(BASE_YAML_PATH)
 
-    index = 1
+    index = START_INDEX
+    generated = 0
     skipped = 0
 
-    for window_size, stride, history in product(WINDOW_SIZES, STRIDES, HISTORIES):
+    training_pairs = list(zip(BATCH_SIZES, LEARNING_RATES))
+
+    for window_size, stride, history, training_pair in product(
+        WINDOW_SIZES,
+        STRIDES,
+        HISTORIES,
+        training_pairs,
+    ):
+        batch_size, lr = training_pair
+
         if stride > window_size:
             print(
                 f"Skipping invalid combination: "
-                f"window_size={window_size}, stride={stride}, history={history} "
+                f"window_size={window_size}, stride={stride}, history={history}, "
+                f"batch_size={batch_size}, lr={lr} "
                 f"(stride must be <= window_size)"
             )
             skipped += 1
@@ -131,13 +197,21 @@ def main() -> None:
         if history < 1:
             print(
                 f"Skipping invalid combination: "
-                f"window_size={window_size}, stride={stride}, history={history} "
+                f"window_size={window_size}, stride={stride}, history={history}, "
+                f"batch_size={batch_size}, lr={lr} "
                 f"(history must be >= 1 for forecasting)"
             )
             skipped += 1
             continue
 
-        run_name = make_run_name(index, window_size, stride, history)
+        run_name = make_run_name(
+            index=index,
+            window_size=window_size,
+            stride=stride,
+            history=history,
+            batch_size=batch_size,
+            lr=lr,
+        )
 
         cfg = make_config(
             base_config=base_config,
@@ -145,6 +219,8 @@ def main() -> None:
             window_size=window_size,
             stride=stride,
             history=history,
+            batch_size=batch_size,
+            lr=lr,
         )
 
         output_yaml_path = OUTPUT_YAML_DIR / f"{run_name}.yaml"
@@ -153,10 +229,13 @@ def main() -> None:
         print(f"Wrote {output_yaml_path}")
 
         index += 1
+        generated += 1
 
     print()
-    print(f"Generated {index - 1} YAML files in {OUTPUT_YAML_DIR}")
+    print(f"Generated {generated} YAML files in {OUTPUT_YAML_DIR}")
     print(f"Skipped {skipped} invalid combinations")
+    print(f"First index: {START_INDEX:04d}")
+    print(f"Last index: {index - 1:04d}" if generated > 0 else "No YAML files generated")
 
 
 if __name__ == "__main__":

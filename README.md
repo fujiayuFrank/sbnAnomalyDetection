@@ -163,6 +163,57 @@ Typical usage:
 python run_gnn_sweep.py
 ```
 
+#### Generating sweep YAML configs
+
+Use `config_maker.py` to batch-generate YAML files for GNN sweep experiments. The generator copies a base YAML such as:
+
+```text
+configs/gnn.yaml
+```
+
+and writes one generated config per selected parameter combination under:
+
+```text
+tuning_configs/gnn_sweep/
+```
+
+The generated config names use a zero-padded numeric prefix plus the swept model settings, for example:
+
+```text
+0081_win20_stride10_hist1_bs64_lr0p003.yaml
+```
+
+The numeric prefix is controlled by the in-script setting:
+
+```python
+START_INDEX = 0
+```
+
+Set it to a later value when you are continuing a sweep and do not want the next generated configs to reuse old names:
+
+```python
+START_INDEX = 81
+```
+
+With this setting, the first generated file starts with `0081_...` instead of `0000_...`.
+
+The generator also supports paired learning-rate and batch-size sweeps:
+
+```python
+BATCH_SIZES = [64, 128]
+LEARNING_RATES = [0.003, 0.001]
+```
+
+These lists are iterated **pair by pair**, not as a full Cartesian product:
+
+```text
+batch_size=64,  lr=0.003
+batch_size=128, lr=0.001
+```
+
+This is useful when each batch size has a matching learning rate that should stay tied together. The two lists must have the same length; otherwise the generator raises an error instead of silently making mismatched configs.
+
+
 For each YAML file, the wrapper creates/reuses a per-run directory under:
 
 ```text
@@ -348,6 +399,57 @@ Typical usage:
 python evaluate_gnn_sweep.py
 ```
 
+#### Starting evaluation from a selected model index
+
+By default, `evaluate_gnn_sweep.py` scans all model folders under:
+
+```text
+checkpoints/gnn/
+```
+
+You can restrict evaluation and plotting to only model directories whose leading numeric prefix is greater than or equal to a chosen start index. This can be set directly in the script:
+
+```python
+MODEL_START_INDEX = None  # use all model directories
+MODEL_START_INDEX = 81    # use 0081_..., 0082_..., ...
+```
+
+You can also pass the start index from the command line:
+
+```bash
+python evaluate_gnn_sweep.py --start 81
+```
+
+The command-line flag has higher priority than the in-code setting:
+
+```text
+--start value  >  MODEL_START_INDEX variable  >  no filtering
+```
+
+For example, if the script has:
+
+```python
+MODEL_START_INDEX = 40
+```
+
+but you run:
+
+```bash
+python evaluate_gnn_sweep.py --start 81
+```
+
+then the evaluator starts from `0081_...`, not `0040_...`.
+
+This filter also affects automatic plotting. If you run:
+
+```bash
+python evaluate_gnn_sweep.py --start 81 --with-plot
+```
+
+then the evaluator first writes a filtered `threshold_metrics_summary.csv`, and the plotting step uses that filtered summary. The resulting `02_metric_relations/` plots therefore include only models from `0081_...` onward.
+
+If no matching model directories exist, the evaluator writes an empty compact summary CSV with only headers, prints a warning, evaluates no metrics, and produces no plots. This prevents the plotter from accidentally reusing an older non-empty `threshold_metrics_summary.csv`.
+
 #### Multiple threshold evaluation
 
 The threshold is configured as a list in the script:
@@ -472,6 +574,7 @@ The evaluator forwards only the plotting-relevant flags to the plotting script:
 | Ranking flags | Yes | No | Ranking only changes CSV row order; plots regroup the rows anyway. |
 | `--threshold-first` | Yes | No | This only changes CSV row order and does not affect plot contents. |
 | `--with-plot` | Yes | No | This only tells the evaluator to launch the plotter. |
+| `--start` | Yes | No | Filters which model directories enter the summary before plotting begins. |
 
 Examples:
 
@@ -568,6 +671,7 @@ Available command-line flags for `evaluate_gnn_sweep.py`:
 
 | Flag | Meaning |
 |------|---------|
+| `--start N` | Only evaluate/plot model directories whose leading numeric prefix is `>= N`. This overrides the in-code `MODEL_START_INDEX` setting. |
 | `--full-summary` | Also write `threshold_metrics_full_summary.csv` and `threshold_per_run_ratios.csv`. Without this flag, only the compact summary CSV is written. |
 | `--with-plot` | After writing the compact summary CSV, run `graphing/plot_sweep_metrics.py` automatically. |
 | `--plot-summary` | Only meaningful with `--with-plot`; forwards `--plot-summary` to the plotting script so it also writes plotter-side CSV summaries. |
@@ -600,6 +704,9 @@ python evaluate_gnn_sweep.py --full-summary --accuracy-rank
 # Evaluate and plot automatically
 python evaluate_gnn_sweep.py --with-plot
 
+# Start from model 0081_... and plot only that filtered range
+python evaluate_gnn_sweep.py --start 81 --with-plot
+
 # Evaluate only scores_only and plot only scores_only
 python evaluate_gnn_sweep.py --scores-only --with-plot
 
@@ -611,6 +718,7 @@ Important top-level settings in the script:
 
 | Setting | Meaning |
 |---------|---------|
+| `MODEL_START_INDEX` | Optional in-code lower bound on the leading numeric model directory prefix. Overridden by `--start`. |
 | `NORMALIZATION_MODE` | Score transform: `tanh`, `sigmoid`, `global_max`, or `none` |
 | `NORMALIZATION_SCOPE` | Use per-model or global normalization scale |
 | `NORMALIZATION_SCALE_MODE` | Use max, percentile, or manual scale |
