@@ -812,6 +812,11 @@ def summarize_scores_npz(score_npz_path: Path) -> dict[str, Any]:
     return metrics
 
 
+def expected_inference_scores_path(run_dir: Path) -> Path:
+    """Expected inference output file for --missing-infer-only."""
+    return run_dir / "inference_scores.npz"
+
+
 def find_score_npz(
     expected_score_npz_path: Path,
     run_dir: Path,
@@ -928,6 +933,12 @@ def run_sweep(args: argparse.Namespace) -> int:
     train_base_cmd = shlex.split(args.train_cmd)
     infer_base_cmd = shlex.split(args.infer_cmd)
 
+    if args.missing_infer_only:
+        args.infer_only = True
+
+    if args.infer_only and args.skip_infer:
+        raise ValueError("--infer-only/--missing-infer-only and --skip-infer cannot be used together.")
+
     conn = init_db(db_path)
 
     print("=" * 80)
@@ -936,6 +947,8 @@ def run_sweep(args: argparse.Namespace) -> int:
     print(f"Runs root: {runs_root}")
     print(f"Database: {db_path}")
     print(f"Batch mode: {args.batch}")
+    print(f"Infer-only mode: {args.infer_only}")
+    print(f"Missing-infer-only mode: {args.missing_infer_only}")
     if args.batch:
         print("Progress-bar suppression env enabled: SBN_BATCH=1, TQDM_DISABLE=1")
     print("=" * 80)
@@ -946,6 +959,15 @@ def run_sweep(args: argparse.Namespace) -> int:
         config_stem = safe_name(config_path.stem)
         run_name = f"{config_stem}"
         run_dir = runs_root / run_name
+        inference_scores_path = expected_inference_scores_path(run_dir)
+
+        if args.missing_infer_only and inference_scores_path.exists():
+            print("\n" + "=" * 80)
+            print(f"[{idx}/{len(config_paths)}] {config_path}")
+            print("Skipping because --missing-infer-only was set and inference output already exists.")
+            print(f"Existing inference output: {inference_scores_path}")
+            print("=" * 80)
+            continue
 
         existing_experiment = get_existing_experiment(conn, run_name)
         existing_status = None
@@ -958,7 +980,25 @@ def run_sweep(args: argparse.Namespace) -> int:
             if args.missing_rewrite:
                 missing_rewrite_needed, missing_rewrite_reason = run_directory_needs_rewrite(run_dir)
 
-            if args.force_rewrite:
+            if args.infer_only:
+                print("\n" + "=" * 80)
+                print(f"[{idx}/{len(config_paths)}] {config_path}")
+                print(f"Run name conflict: {run_name!r}")
+                print(
+                    "infer_only=True, so the old database record will be replaced "
+                    "and inference will be rerun using the existing checkpoint."
+                )
+                print(f"Existing status: {existing_experiment.get('status')}")
+                print(f"Existing run directory from DB: {existing_experiment.get('run_dir')}")
+                print(f"Expected stem-matched run directory: {run_dir}")
+                print(f"Existing final model: {existing_experiment.get('final_model_path')}")
+                print("=" * 80)
+                delete_existing_experiment(
+                    conn,
+                    run_name,
+                    reason="infer_only=True",
+                )
+            elif args.force_rewrite:
                 delete_existing_experiment(
                     conn,
                     run_name,
@@ -1044,6 +1084,10 @@ def run_sweep(args: argparse.Namespace) -> int:
                 run_dir,
             )
 
+            if args.missing_infer_only:
+                patched_cfg.setdefault("inference", {})["output_path"] = str(inference_scores_path)
+                expected_score_npz_path = inference_scores_path
+
             # save_yaml(original_copy_path, original_cfg)
             save_yaml(run_config_path, patched_cfg)
 
@@ -1067,39 +1111,77 @@ def run_sweep(args: argparse.Namespace) -> int:
             )
             insert_params(conn, experiment_id, patched_cfg)
 
-            print("Training...")
-            train_returncode = run_command(
-                train_cmd,
-                cwd=PROJECT_DIR,
-                timeout=args.timeout,
-                monitor_interval=args.monitor_interval,
-                batch=args.batch,
-            )
-            if train_returncode != 0:
-                raise RuntimeError(f"Training failed with return code {train_returncode}")
+            if args.infer_only:
+                if not final_model_path.exists():
+                    error = (
+                        f"Expected trained weight file is missing for run_name={run_name!r}: "
+                        f"{final_model_path}"
+                    )
+                    print(f"ERROR: {error}")
+                    status = "missing_weights"
 
-            if args.skip_infer:
-                print("Skipping inference because --skip-infer was set.")
-                status = "trained_no_infer"
+                else:
+                    if args.missing_infer_only:
+                        print("Skipping training because --missing-infer-only was set.")
+                        print(f"Missing inference output will be regenerated: {inference_scores_path}")
+                    else:
+                        print("Skipping training because --infer-only was set.")
+                    print(f"Using existing checkpoint: {final_model_path}")
+
+                    print("Inference...")
+                    infer_returncode = run_command(
+                        infer_cmd,
+                        cwd=PROJECT_DIR,
+                        timeout=args.timeout,
+                        monitor_interval=args.monitor_interval,
+                        batch=args.batch,
+                    )
+                    if infer_returncode != 0:
+                        raise RuntimeError(f"Inference failed with return code {infer_returncode}")
+
+                    status = "success"
+
             else:
-                print("Inference...")
-                infer_returncode = run_command(
-                    infer_cmd,
+                print("Training...")
+                train_returncode = run_command(
+                    train_cmd,
                     cwd=PROJECT_DIR,
                     timeout=args.timeout,
                     monitor_interval=args.monitor_interval,
                     batch=args.batch,
                 )
-                if infer_returncode != 0:
-                    raise RuntimeError(f"Inference failed with return code {infer_returncode}")
+                if train_returncode != 0:
+                    raise RuntimeError(f"Training failed with return code {train_returncode}")
 
-                status = "success"
+                if args.skip_infer:
+                    print("Skipping inference because --skip-infer was set.")
+                    status = "trained_no_infer"
+                else:
+                    print("Inference...")
+                    infer_returncode = run_command(
+                        infer_cmd,
+                        cwd=PROJECT_DIR,
+                        timeout=args.timeout,
+                        monitor_interval=args.monitor_interval,
+                        batch=args.batch,
+                    )
+                    if infer_returncode != 0:
+                        raise RuntimeError(f"Inference failed with return code {infer_returncode}")
 
-            metrics, score_npz_path = collect_run_metrics(
-                checkpoint_dir=checkpoint_dir,
-                expected_score_npz_path=expected_score_npz_path,
-                run_dir=run_dir,
-            )
+                    status = "success"
+
+            if status != "missing_weights":
+                metrics, score_npz_path = collect_run_metrics(
+                    checkpoint_dir=checkpoint_dir,
+                    expected_score_npz_path=expected_score_npz_path,
+                    run_dir=run_dir,
+                )
+            else:
+                metrics = {
+                    "checkpoint.exists": 0,
+                    "checkpoint.expected_path": str(final_model_path),
+                    "score_npz.exists": 0,
+                }
 
             insert_metrics(conn, experiment_id, metrics)
 
@@ -1187,6 +1269,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--skip-infer",
         action="store_true",
         help="Only train models; do not run inference.",
+    )
+    parser.add_argument(
+        "--infer-only",
+        "--infer_only",
+        dest="infer_only",
+        action="store_true",
+        help=(
+            "Assume models are already trained and rerun inference only. "
+            "For each YAML, the expected checkpoint is "
+            "<runs-root>/<config_stem>/gnn_final.pt. If that file is missing, "
+            "print an error, mark the run as missing_weights, and skip to the next config."
+        ),
+    )
+    parser.add_argument(
+        "--missing-infer-only",
+        "--missing_infer_only",
+        dest="missing_infer_only",
+        action="store_true",
+        help=(
+            "Only rerun inference for models whose run directory does not contain "
+            "inference_scores.npz. This implies --infer-only: training is skipped. "
+            "If the expected weight file gnn_final.pt is missing, print an error "
+            "and skip to the next config."
+        ),
     )
     parser.add_argument(
         "--stop-on-error",

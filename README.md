@@ -98,7 +98,8 @@ sbnAnomalyDetection/
 │    ├── plot_channelhist.py
 │    ├── plot_channel_time.C            # per channel integral value with time line chart plotter
 │    ├── plot_inference_result.py       # model inference score histogram plotter
-│    └── plot_sweep_metrics.py          # Plot the performance of the models in gnn sweep 
+│    ├── plot_sweep_metrics.py          # Plot the performance of the models in gnn sweep 
+│    └── plot_good_bad_scores.py        # Plot the histogram of the anomaly scores of good/bad windows/runs
 └── pyproject.toml
 ```
 
@@ -243,6 +244,8 @@ Useful options:
 | `--infer-cmd` | Inference command. Default: `sbn-infer`. Useful if you want `python -m sbn_anomaly.infer.cli`. |
 | `--timeout` | Optional timeout in seconds for each train/infer subprocess. Default: no timeout. |
 | `--skip-infer` | Train only; do not run inference after training. |
+| `--infer-only` / `--infer_only` | Skip training and rerun inference for every selected YAML. The wrapper expects existing weights at `checkpoints/gnn/<config_stem>/gnn_final.pt`; if the file is missing, it prints an error, marks that run as `missing_weights`, and continues to the next config. |
+| `--missing-infer-only` / `--missing_infer_only` | Skip training and rerun inference only for selected models whose run directory does **not** already contain `inference_scores.npz`. Models that already have `inference_scores.npz` are skipped. If weights are missing, the run is marked `missing_weights`. |
 | `--stop-on-error` | Stop the sweep after the first failed config. Without this flag, failed configs are skipped and later configs continue running. |
 | `--monitor-interval N` / `--monitor_interval N` | Print CPU/RAM usage every `N` seconds while training or inference is running. Use `0` to disable. |
 | `--force-rewrite` / `--force_rewrite` | If a run name already exists in the database, delete the old database record and rerun training/inference, overwriting files in that run directory. |
@@ -306,6 +309,44 @@ A model is rerun only when one of these is true:
 | The directory contains additional artifacts | Keep the existing database record and skip, unless `--force-rewrite` is also passed. |
 
 This is useful after an interrupted or partially failed sweep where SQLite still contains a successful-looking record, but the model folder is missing `gnn_final.pt`, `scores.npz`, plots, or other output files.
+
+#### Inference-only reruns
+
+Use `--infer-only` when the models are already trained and you only want to rerun inference from the YAML configs:
+
+```bash
+python run_gnn_sweep.py --infer-only
+```
+
+For each selected YAML, the wrapper uses the config filename stem as the model name and expects weights at:
+
+```text
+checkpoints/gnn/<config_stem>/gnn_final.pt
+```
+
+If the weight file exists, training is skipped and only `sbn-infer` is run with the patched per-run config. If the weight file is missing, the wrapper prints an error, records the run with status `missing_weights`, and continues to the next YAML instead of crashing the whole sweep.
+
+Use `--missing-infer-only` when you only want to fill in missing inference outputs:
+
+```bash
+python run_gnn_sweep.py --missing-infer-only
+```
+
+This mode implies infer-only behavior. For each selected YAML, the wrapper checks:
+
+```text
+checkpoints/gnn/<config_stem>/inference_scores.npz
+```
+
+If `inference_scores.npz` already exists, that model is skipped and its existing database record is kept. If `inference_scores.npz` is missing, the wrapper checks for `gnn_final.pt`; when the weights exist, it reruns inference and writes the missing inference output. If `gnn_final.pt` is also missing, it prints an error, marks the run as `missing_weights`, and moves on.
+
+Example workflow after a sweep where training succeeded but some inference jobs failed or were interrupted:
+
+```bash
+python run_gnn_sweep.py --missing-infer-only --export-summary
+```
+
+Do not combine `--infer-only` or `--missing-infer-only` with `--skip-infer`, because one asks the wrapper to run inference while the other asks it not to.
 
 `--force-rewrite` has higher priority than `--missing-rewrite`. If both are passed, `--force-rewrite` reruns every selected config with an existing database record, regardless of whether the output directory looks complete.
 

@@ -58,8 +58,9 @@ Available command-line flags:
         script. Example: --start 81 uses 0081_..., 0082_..., etc.
 
     --with-plot
-        After writing threshold_metrics_summary.csv, run the plotting script located
-        in the graphing/ directory relative to this script.
+        After writing threshold_metrics_summary.csv, run the plotting scripts located
+        in the graphing/ directory relative to this script. This includes the
+        existing sweep-metrics plots and the good/bad score distribution plots.
 
 Notes:
   - --scores-only and --scores-max-only are mutually exclusive.
@@ -127,13 +128,26 @@ MODEL_START_INDEX: int | None = None
 OUTPUT_DIR = Path("threshold_evaluation")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Plotting script location, relative to this file.
-# If your plotting script has a different filename, change this one line.
-PLOT_SCRIPT_RELATIVE = Path("graphing/plot_sweep_metrics.py")
+# Plotting script locations, relative to this file.
+# These are run when --with-plot is used.
+PLOT_SWEEP_METRICS_SCRIPT_RELATIVE = Path("graphing/plot_sweep_metrics.py")
+PLOT_GOOD_BAD_DISTRIBUTION_SCRIPT_RELATIVE = Path(
+    "graphing/plot_good_bad_scores.py"
+)
 
-# Extra arguments always passed to the plotting script when --with-plot is used.
-# Example: PLOT_SCRIPT_EXTRA_ARGS = ["--full-summary"]
-PLOT_SCRIPT_EXTRA_ARGS: list[str] = []
+# Output directory for good/bad score distribution plots.
+GOOD_BAD_DISTRIBUTION_OUTPUT_DIR = Path(
+    "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/"
+    "threshold_evaluation/plots/03_good_bad_distribution"
+)
+
+# Extra arguments always passed to the sweep-metrics plotting script when --with-plot is used.
+# Example: PLOT_SWEEP_METRICS_EXTRA_ARGS = ["--full-summary"]
+PLOT_SWEEP_METRICS_EXTRA_ARGS: list[str] = []
+
+# Extra arguments always passed to the good/bad distribution plotting script when --with-plot is used.
+# Example: PLOT_GOOD_BAD_DISTRIBUTION_EXTRA_ARGS = ["--bins", "100"]
+PLOT_GOOD_BAD_DISTRIBUTION_EXTRA_ARGS: list[str] = []
 
 # Choose normalization transform.
 # Options: "tanh", "sigmoid", "global_max", "none"
@@ -491,36 +505,102 @@ def write_csv(path: Path, rows: list[dict], fieldnames: Iterable[str]) -> None:
             writer.writerow(row)
 
 
-def run_plotting_script(args: argparse.Namespace) -> None:
-    import subprocess
-    import sys
+def run_subprocess_command(cmd: list[str], *, title: str) -> None:
+    """Run one subprocess command with readable logging."""
+    print()
+    print("=" * 80)
+    print(title)
+    print(" ".join(cmd))
+    print("=" * 80)
 
+    subprocess.run(cmd, check=True)
+
+
+def run_plotting_script(args: argparse.Namespace, *, model_start_index: int | None) -> None:
+    """Run all plotting scripts requested by --with-plot.
+
+    This runs:
+      1. graphing/plot_sweep_metrics.py
+      2. graphing/plot_good_bad_scores.py
+
+    The good/bad score distribution script receives --start so that plotting uses
+    the same model-start filter as the threshold evaluation.
+    """
     script_dir = Path(__file__).resolve().parent
-    plot_script = script_dir / PLOT_SCRIPT_RELATIVE
 
-    if not plot_script.exists():
-        raise FileNotFoundError(f"Plotting script does not exist: {plot_script}")
+    # ------------------------------------------------------------
+    # 1. Existing threshold/sweep metrics plotting script
+    # ------------------------------------------------------------
+    sweep_plot_script = script_dir / PLOT_SWEEP_METRICS_SCRIPT_RELATIVE
 
-    plot_cmd = [sys.executable, str(plot_script)]
+    if not sweep_plot_script.exists():
+        raise FileNotFoundError(
+            f"Sweep-metrics plotting script does not exist: {sweep_plot_script}"
+        )
+
+    sweep_plot_cmd = [
+        sys.executable,
+        str(sweep_plot_script),
+        *PLOT_SWEEP_METRICS_EXTRA_ARGS,
+    ]
 
     # Forward method-selection flags because they affect which CSV rows are plotted.
     if args.scores_only:
-        plot_cmd.append("--scores-only")
+        sweep_plot_cmd.append("--scores-only")
 
     if args.scores_max_only:
-        plot_cmd.append("--scores-max-only")
+        sweep_plot_cmd.append("--scores-max-only")
 
     # Forward only the plotting summary flag, not evaluator --full-summary.
     if args.plot_summary:
-        plot_cmd.append("--plot-summary")
+        sweep_plot_cmd.append("--plot-summary")
 
-    print()
-    print("=" * 80)
-    print("Running plotting script:")
-    print(" ".join(plot_cmd))
-    print("=" * 80)
+    run_subprocess_command(
+        sweep_plot_cmd,
+        title="Running sweep-metrics plotting script:",
+    )
 
-    subprocess.run(plot_cmd, check=True)
+    # ------------------------------------------------------------
+    # 2. Good/bad score distribution plotting script
+    # ------------------------------------------------------------
+    good_bad_plot_script = script_dir / PLOT_GOOD_BAD_DISTRIBUTION_SCRIPT_RELATIVE
+
+    if not good_bad_plot_script.exists():
+        raise FileNotFoundError(
+            f"Good/bad distribution plotting script does not exist: {good_bad_plot_script}"
+        )
+
+    checkpoints_dir = (script_dir / CHECKPOINTS_GNN_DIR).resolve()
+
+    good_bad_plot_cmd = [
+        sys.executable,
+        str(good_bad_plot_script),
+        str(checkpoints_dir),
+        "--output-dir",
+        str(GOOD_BAD_DISTRIBUTION_OUTPUT_DIR),
+        *PLOT_GOOD_BAD_DISTRIBUTION_EXTRA_ARGS,
+    ]
+
+    # Forward method-selection flags.
+    # In the distribution script:
+    #   --scores-only      means plot only scores
+    #   --scores-max-only  means plot only scores_max
+    #   neither flag       means plot both
+    if args.scores_only:
+        good_bad_plot_cmd.append("--scores-only")
+
+    if args.scores_max_only:
+        good_bad_plot_cmd.append("--scores-max-only")
+
+    # Forward the resolved start index so evaluation and distribution plots
+    # use the same model subset. This covers both --start and MODEL_START_INDEX.
+    if model_start_index is not None:
+        good_bad_plot_cmd.extend(["--start", str(model_start_index)])
+
+    run_subprocess_command(
+        good_bad_plot_cmd,
+        title="Running good/bad score distribution plotting script:",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -1141,7 +1221,7 @@ def main() -> int:
             )
 
     if args.with_plot:
-        return run_plotting_script(args)
+        run_plotting_script(args, model_start_index=model_start_index)
 
     return 0
 
