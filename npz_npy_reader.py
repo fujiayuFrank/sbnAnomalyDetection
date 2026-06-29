@@ -1,4 +1,107 @@
+#!/usr/bin/env python3
+"""
+Inspect dense .npy window files and metadata/sparse .npz files.
+
+This script can:
+  1. Read and summarize dense window .npy files.
+  2. Read and summarize metadata or sparse .npz files.
+  3. Print compact array summaries to the terminal.
+  4. Optionally export the full contents of an .npz file to a long-format CSV.
+
+Available command-line flags
+----------------------------
+
+--npy PATH
+    Path to a dense window .npy file.
+
+    This is used for files written as raw np.memmap arrays. Because those files
+    do not store their own shape, --npz must also be provided so the script can
+    read metadata such as n_channels, n_temporal_bins, and node_features.
+
+    Example:
+        python read_windows.py --npy windows.npy --npz metadata.npz
+
+
+--npz PATH
+    Path to a metadata or sparse .npz file.
+
+    The script prints all keys, shapes, dtypes, dimensions, sizes, and compact
+    values for each array stored in the .npz file.
+
+    Example:
+        python read_windows.py --npz windows_train.npz
+
+
+--full
+    When used with --npz, write a full long-format CSV containing every value
+    stored in the .npz file.
+
+    The terminal output stays compact. The full data dump is written to CSV.
+
+    If --csv-output is not provided, the CSV is saved next to the .npz file as:
+
+        <npz_stem>_full.csv
+
+    Example:
+        python read_windows.py --npz windows_train.npz --full
+
+
+--csv-output PATH
+    Optional output path for the CSV written by --full.
+
+    This flag only matters when --full is also used.
+
+    Example:
+        python read_windows.py --npz windows_train.npz --full --csv-output full_dump.csv
+
+
+--max-items N
+    Maximum number of items to print from large arrays when --full is not used.
+
+    Default:
+        50
+
+    This affects terminal printing only. It does not limit the CSV produced by
+    --full.
+
+    Example:
+        python read_windows.py --npz windows_train.npz --max-items 100
+
+
+Typical usage
+-------------
+
+Print compact information about an .npz file:
+
+    python read_windows.py --npz windows_train.npz
+
+Print compact information and export every .npz value to CSV:
+
+    python read_windows.py --npz windows_train.npz --full
+
+Export every .npz value to a specific CSV path:
+
+    python read_windows.py --npz windows_train.npz --full --csv-output windows_full.csv
+
+Read a dense .npy file using metadata from an .npz file:
+
+    python read_windows.py --npy windows.npy --npz windows_metadata.npz
+
+Notes
+-----
+
+At least one of --npy or --npz must be provided.
+
+If --npy is provided, --npz is required because the dense .npy/memmap file does
+not contain enough metadata to infer its shape by itself.
+
+The --full flag does not print every value to the terminal. It writes every .npz
+value to CSV while keeping the terminal summary compact.
+"""
+
+
 import argparse
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +144,87 @@ def print_array_values(arr, full=False, max_items=50, indent="  "):
         flat = arr.ravel()
         print(f"{indent}first {max_items}: {flat[:max_items]}")
         print(f"{indent}last  {max_items}: {flat[-max_items:]}")
+
+
+def scalar_to_csv_text(x):
+    """Convert NumPy/Python scalar or object value to a CSV-safe text value."""
+    if isinstance(x, np.generic):
+        x = x.item()
+    return repr(x) if isinstance(x, (bytes, str, list, tuple, dict, set)) else x
+
+
+def write_npz_full_csv(npz_path, csv_path=None):
+    """
+    Write every value stored in an NPZ file to one long-format CSV.
+
+    CSV columns:
+      key       - NPZ array name
+      dtype     - array dtype
+      shape     - full array shape
+      ndim      - number of dimensions
+      size      - total number of values in the array
+      flat_index- index after arr.ravel()
+      index     - multidimensional index, e.g. "0,12,3"
+      value     - stored value
+    """
+    npz_path = Path(npz_path)
+    if csv_path is None:
+        csv_path = npz_path.with_name(f"{npz_path.stem}_full.csv")
+    else:
+        csv_path = Path(csv_path)
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    meta = np.load(npz_path, allow_pickle=True)
+    try:
+        with csv_path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "key",
+                "dtype",
+                "shape",
+                "ndim",
+                "size",
+                "flat_index",
+                "index",
+                "value",
+            ])
+
+            for key in meta.files:
+                arr = meta[key]
+                shape_text = "x".join(str(x) for x in arr.shape)
+                flat = arr.ravel()
+
+                if arr.ndim == 0:
+                    writer.writerow([
+                        key,
+                        str(arr.dtype),
+                        shape_text,
+                        arr.ndim,
+                        arr.size,
+                        0,
+                        "",
+                        scalar_to_csv_text(arr.item()),
+                    ])
+                    continue
+
+                for flat_index, value in enumerate(flat):
+                    multi_index = np.unravel_index(flat_index, arr.shape)
+                    index_text = ",".join(str(i) for i in multi_index)
+                    writer.writerow([
+                        key,
+                        str(arr.dtype),
+                        shape_text,
+                        arr.ndim,
+                        arr.size,
+                        flat_index,
+                        index_text,
+                        scalar_to_csv_text(value),
+                    ])
+    finally:
+        meta.close()
+
+    return csv_path
 
 
 def print_npz(npz_path, full=False, max_items=50):
@@ -331,7 +515,17 @@ def main():
     parser.add_argument(
         "--full",
         action="store_true",
-        help="Print exact full contents of every array in the .npz file.",
+        help=(
+            "Write a full long-format CSV containing every value in the .npz file. "
+            "By default the CSV is saved next to the .npz as <stem>_full.csv."
+        ),
+    )
+
+    parser.add_argument(
+        "--csv-output",
+        type=str,
+        default=None,
+        help="Optional output path for the --full CSV.",
     )
 
     parser.add_argument(
@@ -356,7 +550,15 @@ def main():
         npz_path = Path(args.npz)
         if not npz_path.exists():
             raise FileNotFoundError(f"Cannot find .npz file: {npz_path}")
-        print_npz(npz_path, full=args.full, max_items=args.max_items)
+
+        # Keep terminal output compact. The full data dump goes to CSV when --full is used.
+        print_npz(npz_path, full=False, max_items=args.max_items)
+
+        if args.full:
+            csv_path = write_npz_full_csv(npz_path, args.csv_output)
+            print("\n" + "=" * 80)
+            print(f"Full NPZ CSV written to: {csv_path}")
+            print("=" * 80)
 
 
 if __name__ == "__main__":
