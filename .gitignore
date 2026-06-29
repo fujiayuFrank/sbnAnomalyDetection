@@ -76,3 +76,5 @@ runs/
 # working scratch files
 leaf_names.txt
 nohup.out
+data/windows_test.npz
+data/windows_train.npz
