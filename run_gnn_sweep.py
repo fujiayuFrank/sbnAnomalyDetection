@@ -1285,6 +1285,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--missing-infer-only",
         "--missing_infer_only",
+        "--missing-infer_only",
+        "--missing_infer-only",
         dest="missing_infer_only",
         action="store_true",
         help=(
