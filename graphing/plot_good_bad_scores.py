@@ -72,7 +72,7 @@ BAD_RUNS = {
 
 DEFAULT_OUTPUT_DIR = Path(
     "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/"
-    "threshold_evaluation/plots/03_good_bad_distribution"
+    "threshold_evaluation/plots/04_good_bad_distribution"
 )
 
 NPZ_NAME = "inference_scores.npz"

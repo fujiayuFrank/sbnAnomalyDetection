@@ -110,6 +110,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Literal
 
 import numpy as np
+import yaml
 
 
 # ============================================================
@@ -138,7 +139,7 @@ PLOT_GOOD_BAD_DISTRIBUTION_SCRIPT_RELATIVE = Path(
 # Output directory for good/bad score distribution plots.
 GOOD_BAD_DISTRIBUTION_OUTPUT_DIR = Path(
     "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/"
-    "threshold_evaluation/plots/03_good_bad_distribution"
+    "threshold_evaluation/plots/04_good_bad_distribution"
 )
 
 # Extra arguments always passed to the sweep-metrics plotting script when --with-plot is used.
@@ -482,10 +483,45 @@ def load_required_arrays(npz_path: Path) -> dict[str, np.ndarray]:
     }
 
 
+def load_training_params_from_model_dir(model_dir: Path) -> dict[str, float | int | str]:
+    """Read batch_size and learning_rate from the model's copied YAML config."""
+    candidate_configs = [
+        model_dir / "config_run.yaml",
+        model_dir / "config_original.yaml",
+        model_dir / f"{model_dir.name}.yaml",
+    ]
+
+    for config_path in candidate_configs:
+        if not config_path.exists():
+            continue
+
+        try:
+            with config_path.open("r") as f:
+                config = yaml.safe_load(f) or {}
+        except Exception as exc:
+            print(f"WARNING: failed to read config {config_path}: {exc}")
+            continue
+
+        training = config.get("training", {}) or {}
+
+        return {
+            "batch_size": training.get("batch_size", ""),
+            "learning_rate": training.get("lr", ""),
+        }
+
+    print(f"WARNING: no copied YAML config found in {model_dir}; batch_size/lr left blank")
+    return {
+        "batch_size": "",
+        "learning_rate": "",
+    }
+
+
 def write_empty_compact_summary_csv(path: Path) -> None:
     """Write an empty compact summary CSV so old results are not accidentally reused."""
     compact_summary_fields = [
         "model_name",
+        "batch_size",
+        "learning_rate",
         "method",
         "threshold",
         "normalization_model",
@@ -935,6 +971,8 @@ def append_metrics_for_model_threshold(
         metrics = confusion_and_metrics(y_true_bad[eval_mask], pred_bad[eval_mask])
         row = {
             "model_name": model_name,
+            "batch_size": prepared["batch_size"],
+            "learning_rate": prepared["learning_rate"],
             "method": method,
             "threshold": threshold,
             "normalization_mode": NORMALIZATION_MODE,
@@ -1084,6 +1122,11 @@ def main() -> int:
             global_score_max_ref_max=global_score_max_ref_max,
         )
         if prepared is not None:
+            model_dir = CHECKPOINTS_GNN_DIR / model_name
+            training_params = load_training_params_from_model_dir(model_dir)
+            prepared["batch_size"] = training_params["batch_size"]
+            prepared["learning_rate"] = training_params["learning_rate"]
+
             prepared_by_model[model_name] = prepared
 
     if not prepared_by_model:
@@ -1134,6 +1177,8 @@ def main() -> int:
     # Compact summary: this is always written.
     compact_summary_fields = [
         "model_name",
+        "batch_size",
+        "learning_rate",
         "method",
         "threshold",
         "normalization_model",
@@ -1143,7 +1188,7 @@ def main() -> int:
 
     # Full summary: only written when --full-summary is passed.
     full_summary_fields = [
-        "model_name", "method", "threshold",
+        "model_name", "batch_size", "learning_rate", "method", "threshold",
         "normalization_mode", "normalization_scope", "normalization_scale_mode",
         "score_scale", "score_max_scale", "score_reference_max", "score_max_reference_max",
         "n_windows_total", "n_windows_evaluated", "n_true_good_windows", "n_true_bad_windows",
@@ -1161,6 +1206,8 @@ def main() -> int:
     for row in summary_rows:
         compact_rows.append({
             "model_name": row["model_name"],
+            "batch_size": row["batch_size"],
+            "learning_rate": row["learning_rate"],
             "method": row["method"],
             "threshold": row["threshold"],
             "normalization_model": row["normalization_mode"],
