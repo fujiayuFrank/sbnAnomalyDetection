@@ -22,16 +22,29 @@ Expected CSV columns:
     TP, TN, FP, FN,
     precision, recall, F1, accuracy
 
+Optional CSV columns for training-setting plots:
+
+    batch_size, learning_rate
+
+If batch_size and learning_rate are not CSV columns, the script tries to parse
+them from model_name fragments like:
+
+    bs64_lr0p003
+    bs128_lr0.001
+
 Expected model_name format:
 
     0001_win20_stride10_hist1
     0002_win50_stride20_hist6
+    0121_win1000_stride1000_hist10_bs32_lr0p003
 
 The script extracts:
 
     window_size
     window_stride
     history
+    batch_size
+    learning_rate
 
 Then it creates:
 
@@ -51,11 +64,30 @@ Then it creates:
         recall/
         F1/
 
-For relation plots, the script fixes two of:
+      03_training_setting_relations/
+        accuracy/
+          vary_batch_size_fixed_learning_rate/
+          vary_learning_rate_fixed_batch_size/
+        precision/
+        recall/
+        F1/
+
+For normal relation plots, the script fixes two of:
 
     window_size, window_stride, history
 
 and plots the metric against the remaining third variable.
+
+For training-setting relation plots, the script ignores:
+
+    window_size, window_stride, history
+
+because these are assumed fixed during batch-size / learning-rate sweeps.
+
+It creates:
+
+    metric vs batch_size, fixed learning_rate
+    metric vs learning_rate, fixed batch_size
 """
 
 from __future__ import annotations
@@ -158,7 +190,13 @@ REQUIRED_COLUMNS = {
 }
 
 METRIC_COLUMNS = ["accuracy", "precision", "recall", "F1"]
+
+# Original sweep variables.
 MODEL_VARIABLES = ["window_size", "window_stride", "history"]
+
+# New training-setting variables.
+TRAINING_VARIABLES = ["batch_size", "learning_rate"]
+
 CONTEXT_COLUMNS = ["method", "normalization_model", "threshold"]
 
 
@@ -225,6 +263,57 @@ def parse_model_name(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def parse_training_settings(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure batch_size and learning_rate columns exist.
+
+    Preferred:
+        Use existing CSV columns:
+            batch_size
+            learning_rate
+
+    Fallback:
+        Parse from model_name if the name contains fragments like:
+            bs64_lr0p003
+            bs128_lr0.001
+    """
+    out = df.copy()
+
+    if "batch_size" not in out.columns or "learning_rate" not in out.columns:
+        parsed = out["model_name"].str.extract(
+            r"bs(?P<batch_size>\d+)_lr(?P<learning_rate>[0-9p\.eE\-]+)"
+        )
+
+        if "batch_size" not in out.columns:
+            out["batch_size"] = parsed["batch_size"]
+
+        if "learning_rate" not in out.columns:
+            out["learning_rate"] = parsed["learning_rate"]
+
+    out["batch_size"] = pd.to_numeric(out["batch_size"], errors="coerce")
+
+    # Allow learning-rate strings like 0p003 from filenames.
+    out["learning_rate"] = (
+        out["learning_rate"]
+        .astype(str)
+        .str.replace("p", ".", regex=False)
+    )
+    out["learning_rate"] = pd.to_numeric(out["learning_rate"], errors="coerce")
+
+    missing_rows = out[["batch_size", "learning_rate"]].isna().any(axis=1)
+
+    if missing_rows.any():
+        bad_names = out.loc[missing_rows, "model_name"].drop_duplicates().tolist()
+        raise ValueError(
+            "Could not determine batch_size and learning_rate for some rows. "
+            "Make sure the CSV has columns 'batch_size' and 'learning_rate', "
+            "or model_name contains fragments like 'bs64_lr0p003'. Examples:\n"
+            + "\n".join(f"  - {name}" for name in bad_names[:20])
+        )
+
+    return out
+
+
 def filter_dataframe(
     df: pd.DataFrame,
     method: str | None,
@@ -253,10 +342,11 @@ def make_numeric(df: pd.DataFrame) -> pd.DataFrame:
     """Convert metric and parameter columns to numeric values."""
     out = df.copy()
 
-    for col in METRIC_COLUMNS + MODEL_VARIABLES + ["threshold"]:
+    for col in METRIC_COLUMNS + MODEL_VARIABLES + TRAINING_VARIABLES + ["threshold"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    out = out.dropna(subset=METRIC_COLUMNS + MODEL_VARIABLES)
+    out = out.dropna(subset=METRIC_COLUMNS + MODEL_VARIABLES + TRAINING_VARIABLES)
+
     return out
 
 
@@ -474,6 +564,109 @@ def plot_all_metric_relations(
             )
 
 
+def plot_training_setting_relations(
+    df: pd.DataFrame,
+    output_dir: Path,
+    save_csv: bool,
+) -> None:
+    """
+    Plot metric behavior for training settings only.
+
+    This ignores:
+        window_size, window_stride, history
+
+    It creates two plot types for each metric:
+
+        1. fixed learning_rate, vary batch_size
+        2. fixed batch_size, vary learning_rate
+    """
+    plot_specs = [
+        {
+            "vary_var": "batch_size",
+            "fixed_var": "learning_rate",
+            "subdir": "vary_batch_size_fixed_learning_rate",
+        },
+        {
+            "vary_var": "learning_rate",
+            "fixed_var": "batch_size",
+            "subdir": "vary_learning_rate_fixed_batch_size",
+        },
+    ]
+
+    for metric in PLOT_METRICS:
+        for spec in plot_specs:
+            vary_var = spec["vary_var"]
+            fixed_var = spec["fixed_var"]
+
+            metric_dir = (
+                output_dir
+                / "03_training_setting_relations"
+                / safe_name(metric)
+                / spec["subdir"]
+            )
+            metric_dir.mkdir(parents=True, exist_ok=True)
+
+            group_cols = CONTEXT_COLUMNS + [fixed_var]
+
+            for keys, part in df.groupby(group_cols, dropna=False):
+                method, norm, threshold, fixed_value = keys
+
+                summary = (
+                    part.groupby(vary_var, as_index=False)[metric]
+                    .agg(mean="mean", std="std", count="count")
+                    .sort_values(vary_var)
+                )
+
+                if summary.empty:
+                    continue
+
+                fig, ax = plt.subplots(figsize=(8, 5))
+
+                ax.plot(
+                    summary[vary_var],
+                    summary["mean"],
+                    marker=MARKER,
+                    label=metric_label(metric),
+                )
+
+                # If there are duplicate rows for the same x value,
+                # show standard deviation.
+                if (summary["count"] > 1).any() and summary["std"].notna().any():
+                    ax.errorbar(
+                        summary[vary_var],
+                        summary["mean"],
+                        yerr=summary["std"].fillna(0.0),
+                        fmt="none",
+                        capsize=3,
+                    )
+
+                ax.set_xlabel(vary_var)
+                ax.set_ylabel(metric_label(metric))
+                ax.set_title(
+                    f"{metric_label(metric)} vs {vary_var}\n"
+                    f"fixed {fixed_var}={fixed_value}\n"
+                    f"{context_name(method, norm, threshold)}"
+                )
+                ax.grid(True, alpha=0.3)
+
+                apply_y_limits(ax, metric, summary["mean"])
+
+                fig.tight_layout()
+
+                filename = (
+                    f"{safe_name(metric)}_vs_{safe_name(vary_var)}"
+                    f"_fixed-{safe_name(fixed_var)}-{safe_name(fixed_value)}"
+                    f"_{context_filename(method, norm, threshold)}.png"
+                )
+
+                fig.savefig(metric_dir / filename, dpi=200)
+                plt.close(fig)
+
+                if save_csv:
+                    csv_name = filename.replace(".png", ".csv")
+                    summary.to_csv(metric_dir / csv_name, index=False)
+
+
 def save_clean_dataframe(df: pd.DataFrame, output_dir: Path) -> None:
     """
     Save the parsed and filtered dataframe for checking.
@@ -491,6 +684,8 @@ def save_clean_dataframe(df: pd.DataFrame, output_dir: Path) -> None:
         "window_size",
         "window_stride",
         "history",
+        "batch_size",
+        "learning_rate",
         "accuracy",
         "precision",
         "recall",
@@ -537,6 +732,16 @@ def print_summary(
         print(f"  {value}")
 
     print()
+    print("Available batch sizes in filtered data:")
+    for value in sorted(df["batch_size"].dropna().unique()):
+        print(f"  {value}")
+
+    print()
+    print("Available learning rates in filtered data:")
+    for value in sorted(df["learning_rate"].dropna().unique()):
+        print(f"  {value}")
+
+    print()
     print("Metric summary:")
     print(df[PLOT_METRICS].describe().to_string())
 
@@ -550,6 +755,8 @@ def print_summary(
         "window_size",
         "window_stride",
         "history",
+        "batch_size",
+        "learning_rate",
         "accuracy",
         "precision",
         "recall",
@@ -625,7 +832,9 @@ def main() -> int:
 
     csv_files = find_csv_files(input_path)
     df = load_csv_files(csv_files)
+
     df = parse_model_name(df)
+    df = parse_training_settings(df)
 
     df = filter_dataframe(
         df,
@@ -645,7 +854,21 @@ def main() -> int:
     # Save relation CSVs only with --plot-summary, unless SAVE_RELATION_CSV
     # is manually set to True in the user settings.
     save_relation_csv = SAVE_RELATION_CSV or args.plot_summary
+
+    # Original relation plots:
+    #   vary window_size / window_stride / history.
     plot_all_metric_relations(
+        df=df,
+        output_dir=output_dir,
+        save_csv=save_relation_csv,
+    )
+
+    # New relation plots:
+    #   vary batch_size while fixing learning_rate
+    #   vary learning_rate while fixing batch_size
+    #
+    # These ignore window_size, window_stride, and history.
+    plot_training_setting_relations(
         df=df,
         output_dir=output_dir,
         save_csv=save_relation_csv,
@@ -666,6 +889,10 @@ def main() -> int:
     print("Done.")
     print(f"Histogram plots saved to: {output_dir / '01_metric_histograms'}")
     print(f"Relation plots saved to: {output_dir / '02_metric_relations'}")
+    print(
+        "Training-setting relation plots saved to:",
+        output_dir / "03_training_setting_relations",
+    )
 
     if args.plot_summary:
         print(f"CSV summaries saved to: {output_dir / '03_tables'}")

@@ -20,20 +20,18 @@ OUTPUT_YAML_DIR = Path("tuning_configs/gnn_sweep")
 # Example:
 #   START_INDEX = 0    -> 0000_win20_stride10_hist1_bs64_lr0p003.yaml
 #   START_INDEX = 81   -> 0081_win20_stride10_hist1_bs64_lr0p003.yaml
-START_INDEX = 81
+START_INDEX = 121
 
 # Parameter values to sweep
-WINDOW_SIZES = [200, 500, 700, 1000]
-STRIDES = [200, 500, 700, 1000]
-HISTORIES = [1, 10, 15, 20]
+WINDOW_SIZES = [1000]
+STRIDES = [1000]
+HISTORIES = [10]
 
-# Paired training settings.
-# These are iterated pair by pair:
-#   BATCH_SIZES[0] uses LEARNING_RATES[0]
-#   BATCH_SIZES[1] uses LEARNING_RATES[1]
-#   etc.
-BATCH_SIZES = [64]
-LEARNING_RATES = [0.003]
+# Training settings.
+# These are now iterated as a full Cartesian product:
+#   every batch size × every learning rate
+BATCH_SIZES = [32, 64, 128, 256, 512]
+LEARNING_RATES = [0.0005, 0.0008, 0.001, 0.003, 0.005]
 
 DEFAULT_WEIGHT_DECAY = 1.0e-4
 DEFAULT_MAX_EPOCHS = 100
@@ -88,16 +86,12 @@ def format_float_for_name(value: float) -> str:
 
 
 def validate_training_sweep_lists() -> None:
-    if len(BATCH_SIZES) != len(LEARNING_RATES):
-        raise ValueError(
-            "BATCH_SIZES and LEARNING_RATES must have the same length because "
-            "they are iterated pair by pair.\n"
-            f"len(BATCH_SIZES) = {len(BATCH_SIZES)}\n"
-            f"len(LEARNING_RATES) = {len(LEARNING_RATES)}"
-        )
-
+    """Validate sweep lists for full Cartesian-product training settings."""
     if len(BATCH_SIZES) == 0:
-        raise ValueError("BATCH_SIZES and LEARNING_RATES cannot be empty.")
+        raise ValueError("BATCH_SIZES cannot be empty.")
+
+    if len(LEARNING_RATES) == 0:
+        raise ValueError("LEARNING_RATES cannot be empty.")
 
 
 def make_run_name(
@@ -174,16 +168,13 @@ def main() -> None:
     generated = 0
     skipped = 0
 
-    training_pairs = list(zip(BATCH_SIZES, LEARNING_RATES))
-
-    for window_size, stride, history, training_pair in product(
+    for window_size, stride, history, batch_size, lr in product(
         WINDOW_SIZES,
         STRIDES,
         HISTORIES,
-        training_pairs,
+        BATCH_SIZES,
+        LEARNING_RATES,
     ):
-        batch_size, lr = training_pair
-
         if stride > window_size:
             print(
                 f"Skipping invalid combination: "
