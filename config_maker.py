@@ -136,18 +136,18 @@ OUTPUT_YAML_DIR = Path("tuning_configs/gnn_sweep")
 # Example:
 #   START_INDEX = 0    -> 0000_win20_stride10_hist1_bs64_lr0p003.yaml
 #   START_INDEX = 81   -> 0081_win20_stride10_hist1_bs64_lr0p003.yaml
-START_INDEX = 121
+START_INDEX = 2
 
 # Parameter values to sweep
-WINDOW_SIZES = [1000]
-STRIDES = [1000]
+WINDOW_SIZES = [500, 1000]
+STRIDES = [500, 1000]
 HISTORIES = [10]
 
 # Training settings.
 # These are now iterated as a full Cartesian product:
 #   every batch size × every learning rate
-BATCH_SIZES = [32, 64, 128, 256, 512]
-LEARNING_RATES = [0.0005, 0.0008, 0.001, 0.003, 0.005]
+BATCH_SIZES = [64]
+LEARNING_RATES = [0.003]
 
 DEFAULT_WEIGHT_DECAY = 1.0e-4
 DEFAULT_MAX_EPOCHS = 100
@@ -170,6 +170,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--same-stride",
+        "--same_stride",
+        "--same",
         action="store_true",
         help=(
             "Ignore STRIDES and automatically set stride = window_size "

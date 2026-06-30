@@ -2,7 +2,6 @@
 
 from pathlib import Path
 from typing import Optional, Dict, List
-from collections import defaultdict
 
 import re
 import numpy as np
@@ -13,11 +12,12 @@ import numpy as np
 # ============================================================
 
 # Directory containing the input .npz files
-NPZ_DIR = Path("/exp/sbnd/data/users/jiayufu/checkpoints")
+NPZ_DIR = Path("/exp/sbnd/data/users/micarrig/DQM/tpc_data")
 
 # Output files
-TEST_OUTPUT_PATH = NPZ_DIR / "windows_test.npz"
-TRAIN_OUTPUT_PATH = NPZ_DIR / "windows_train.npz"
+OUTPUT_PARENT_PATH = Path("/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection")
+TEST_OUTPUT_PATH = OUTPUT_PARENT_PATH / "windows_test.npz"
+TRAIN_OUTPUT_PATH = OUTPUT_PARENT_PATH / "windows_train.npz"
 
 # Whether to search subdirectories recursively
 RECURSIVE = True
@@ -27,6 +27,10 @@ RANDOM_SEED = 12345
 
 # Whether to print detailed file-level information
 PRINT_FILES = True
+
+# If True, use np.savez_compressed.
+# If False, use np.savez, which is usually much faster but creates larger files.
+COMPRESS_OUTPUT = False
 
 
 # ============================================================
@@ -44,6 +48,18 @@ PRINT_FILES = True
 # This keeps exactly 50 channels: 9600, 9601, ..., 9649.
 CHANNEL_START = 9600
 CHANNEL_END = 9650
+
+
+# If None:
+#   use all remaining training files, same behavior as before.
+#
+# If an integer:
+#   write exactly this many windows/events into windows_train.npz.
+#   The script will use train files in sorted order and, if needed, take
+#   only the first part of the last file to hit this exact window count.
+MAX_TRAIN_WINDOW_NUM = None
+# MAX_TRAIN_WINDOW_NUM = 100000
+
 
 # If True:
 #   original channels 9600, 9601, ..., 9649 become 0, 1, ..., 49
@@ -73,6 +89,7 @@ BAD_RUNS = {
     19946,
     20104,
 }
+
 
 # ============================================================
 # NPZ key settings
@@ -159,17 +176,21 @@ def read_file_info(npz_path: Path) -> Optional[Dict]:
       }
 
     Returns None if the file cannot be used.
+
+    Note:
+      n_windows is the number of windows/events in this sparse file before
+      channel filtering. Zero-hit windows after channel filtering are still kept.
     """
     try:
         with np.load(npz_path, allow_pickle=True) as data:
             if "evt_run" not in data.files:
-                print(f"[WARNING] Missing evt_run: {npz_path}")
+                print(f"[WARNING] Missing evt_run: {npz_path}", flush=True)
                 return None
 
             evt_run = data["evt_run"]
 
             if evt_run.size == 0:
-                print(f"[WARNING] Empty evt_run: {npz_path}")
+                print(f"[WARNING] Empty evt_run: {npz_path}", flush=True)
                 return None
 
             run = int(evt_run.flat[0])
@@ -184,7 +205,7 @@ def read_file_info(npz_path: Path) -> Optional[Dict]:
             }
 
     except Exception as e:
-        print(f"[ERROR] Could not read {npz_path}: {e}")
+        print(f"[ERROR] Could not read {npz_path}: {e}", flush=True)
         return None
 
 
@@ -217,6 +238,10 @@ def select_good_files_for_test(
     is close to the target number of bad windows.
 
     This selects whole .npz files, never partial files.
+
+    The selection uses the original number of windows/events before channel
+    filtering. Since zero-hit windows are still kept, this is also the written
+    window count after filtering.
     """
     rng = np.random.default_rng(random_seed)
 
@@ -248,30 +273,24 @@ def validate_channel_settings() -> None:
         )
 
 
-def validate_same_n_channels(existing_n_channels, new_n_channels, npz_path: Path):
-    """Make sure all files have the same original n_channels."""
-    if existing_n_channels is None:
-        return new_n_channels
-
-    if int(existing_n_channels) != int(new_n_channels):
-        raise ValueError(
-            f"n_channels mismatch in {npz_path}: "
-            f"expected {existing_n_channels}, got {new_n_channels}"
-        )
-
-    return existing_n_channels
-
-
 def filter_one_file_by_channel_range(data, npz_path: Path):
     """
-    Filter one loaded npz file by CHANNEL_START <= channels_flat < CHANNEL_END.
+    Fast vectorized filtering by CHANNEL_START <= channels_flat < CHANNEL_END.
+
+    This version keeps ALL windows/events, even if a window has zero selected hits.
+
+    Functionally:
+      - keeps every original window/event
+      - removes flat hit entries outside the channel range
+      - rebuilds offsets correctly
+      - optionally reindexes selected channels to 0...(CHANNEL_END-CHANNEL_START-1)
 
     Returns:
       filtered_flat_parts:
         dict of filtered flat arrays for this file
 
       new_offsets:
-        offsets after filtering, starting from 0
+        offsets after filtering, with length n_windows + 1
 
       n_kept_hits:
         total number of selected flat entries in this file
@@ -289,57 +308,63 @@ def filter_one_file_by_channel_range(data, npz_path: Path):
             f"Expected len(offsets)=n_windows+1."
         )
 
-    filtered_flat_parts = {key: [] for key in FLAT_KEYS}
-    new_offsets = [0]
-    n_kept_hits = 0
+    # One global hit-level mask for all flat entries.
+    hit_mask = (channels >= CHANNEL_START) & (channels < CHANNEL_END)
 
-    for i_window in range(n_windows):
-        start = int(offsets[i_window])
-        end = int(offsets[i_window + 1])
-
-        window_channels = channels[start:end]
-
-        mask = (window_channels >= CHANNEL_START) & (window_channels < CHANNEL_END)
-
-        n_selected_this_window = int(np.count_nonzero(mask))
-        n_kept_hits += n_selected_this_window
-
-        for key in FLAT_KEYS:
-            arr = data[key]
-            selected = arr[start:end][mask]
-
-            if key == "channels_flat" and REINDEX_CHANNELS:
-                selected = selected - CHANNEL_START
-
-            filtered_flat_parts[key].append(selected)
-
-        new_offsets.append(n_kept_hits)
+    filtered_flat_parts = {}
 
     for key in FLAT_KEYS:
-        if filtered_flat_parts[key]:
-            filtered_flat_parts[key] = np.concatenate(filtered_flat_parts[key], axis=0)
-        else:
-            filtered_flat_parts[key] = np.asarray([], dtype=data[key].dtype)
+        selected = data[key][hit_mask]
 
-    new_offsets = np.asarray(new_offsets, dtype=np.int64)
+        if key == "channels_flat" and REINDEX_CHANNELS:
+            selected = selected - CHANNEL_START
+
+        filtered_flat_parts[key] = selected
+
+    # Rebuild offsets after filtering.
+    #
+    # selected_cumsum[j] gives the number of kept hits before flat index j.
+    # Therefore selected_cumsum[offsets] gives the new offsets for every
+    # original window, including windows with zero selected hits.
+    selected_cumsum = np.empty(hit_mask.shape[0] + 1, dtype=np.int64)
+    selected_cumsum[0] = 0
+    selected_cumsum[1:] = np.cumsum(hit_mask, dtype=np.int64)
+
+    new_offsets = selected_cumsum[offsets]
+    n_kept_hits = int(new_offsets[-1])
 
     return filtered_flat_parts, new_offsets, n_kept_hits
 
 
-def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
+def concatenate_npz_files(
+    input_paths: List[Path],
+    output_path: Path,
+    max_windows: Optional[int] = None,
+) -> None:
     """
-    Concatenate sparse window .npz files into one .npz file.
+    Concatenate sparse window/event .npz files into one .npz file.
 
     Important handling:
       - flat arrays are filtered by channel range before concatenation
-      - flat arrays are concatenated directly after filtering
-      - offsets are rebuilt after filtering
-      - evt_run, evt_subrun, evt_num, evt_file_idx are concatenated per window
-      - filenames are concatenated, and evt_file_idx is shifted accordingly
+      - windows/events with zero selected hits are still kept
+      - per-window arrays are NOT filtered by channel selection
+      - offsets are rebuilt after hit filtering
+      - evt_file_idx is shifted according to concatenated filenames
       - n_channels is set to CHANNEL_END - CHANNEL_START if REINDEX_CHANNELS=True
+
+    max_windows:
+      If None, write all windows/events from input_paths.
+      If an integer, write exactly up to max_windows windows/events.
+      If the limit falls inside a file, only the first needed windows/events
+      from that file are written.
     """
     if not input_paths:
         raise ValueError(f"No input files provided for {output_path}")
+
+    if max_windows is not None:
+        max_windows = int(max_windows)
+        if max_windows <= 0:
+            raise ValueError(f"max_windows must be positive or None, got {max_windows}")
 
     flat_parts = {key: [] for key in FLAT_KEYS}
     per_window_parts = {key: [] for key in PER_WINDOW_KEYS}
@@ -354,11 +379,27 @@ def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
     total_windows = 0
     total_kept_hits = 0
 
-    for npz_path in input_paths:
+    reached_window_limit = False
+
+    for i_file, npz_path in enumerate(input_paths, start=1):
+        if max_windows is not None and total_windows >= max_windows:
+            reached_window_limit = True
+            break
+
+        print(
+            f"[{output_path.name}] reading/filtering "
+            f"{i_file}/{len(input_paths)}: {npz_path}",
+            flush=True,
+        )
+
         with np.load(npz_path, allow_pickle=True) as data:
             keys = set(data.files)
 
-            required_keys = set(FLAT_KEYS + PER_WINDOW_KEYS + [OFFSETS_KEY, N_CHANNELS_KEY])
+            required_keys = set(
+                FLAT_KEYS
+                + PER_WINDOW_KEYS
+                + [OFFSETS_KEY, N_CHANNELS_KEY]
+            )
             missing_keys = required_keys - keys
 
             if missing_keys:
@@ -371,46 +412,80 @@ def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
             if evt_run.size == 0:
                 raise ValueError(f"Empty evt_run in {npz_path}")
 
-            n_windows = int(evt_run.shape[0])
+            n_windows_in_file = int(evt_run.shape[0])
 
-            # Check original n_channels consistency.
+            # Decide how many windows to take from this file.
+            # If max_windows is None, take the whole file.
+            # If max_windows is set, take only what is needed to reach the limit.
+            if max_windows is None:
+                n_windows_to_take = n_windows_in_file
+            else:
+                remaining_windows = max_windows - total_windows
+                n_windows_to_take = min(n_windows_in_file, remaining_windows)
+
+            if n_windows_to_take <= 0:
+                reached_window_limit = True
+                break
+
+            # Original files may have slightly different n_channels if some
+            # channels were not recorded. Do not require consistency.
             n_channels_current = int(np.asarray(data[N_CHANNELS_KEY]).flat[0])
-            original_n_channels_value = validate_same_n_channels(
-                original_n_channels_value,
-                n_channels_current,
-                npz_path,
-            )
+
+            if original_n_channels_value is None:
+                original_n_channels_value = n_channels_current
+
+            if CHANNEL_START >= n_channels_current:
+                print(
+                    f"[WARNING] CHANNEL_START={CHANNEL_START} is outside "
+                    f"n_channels={n_channels_current} for {npz_path}. "
+                    f"This file may contribute no hits in the selected range.",
+                    flush=True,
+                )
 
             # Filter flat arrays by channel range.
-            filtered_flat_parts, filtered_offsets, n_kept_hits = filter_one_file_by_channel_range(
+            # This keeps all windows/events, even if some windows have zero selected hits.
+            filtered_flat_parts, filtered_offsets, n_kept_hits_full_file = filter_one_file_by_channel_range(
                 data,
                 npz_path,
             )
 
+            # If taking only part of this file, trim the filtered result to the
+            # first n_windows_to_take windows.
+            #
+            # filtered_offsets has length n_windows_in_file + 1.
+            # filtered_offsets[n_windows_to_take] gives the number of selected
+            # flat entries belonging to the first n_windows_to_take windows.
+            local_flat_length_to_take = int(filtered_offsets[n_windows_to_take])
+
             for key in FLAT_KEYS:
-                flat_parts[key].append(filtered_flat_parts[key])
+                flat_parts[key].append(filtered_flat_parts[key][:local_flat_length_to_take])
+
+            filtered_offsets_to_take = filtered_offsets[: n_windows_to_take + 1]
+            n_kept_hits = local_flat_length_to_take
 
             # Shift and append offsets.
             #
-            # filtered_offsets starts from 0 for this individual file.
-            # We skip filtered_offsets[0] and append filtered_offsets[1:]
-            # shifted by the current total flat length.
-            shifted_offsets = filtered_offsets[1:] + total_flat_length
+            # filtered_offsets_to_take starts from 0 for this individual file slice.
+            # We skip filtered_offsets_to_take[0] and append the rest shifted by
+            # the current total flat length.
+            shifted_offsets = filtered_offsets_to_take[1:] + total_flat_length
             combined_offsets.extend(shifted_offsets.tolist())
 
             total_flat_length += n_kept_hits
             total_kept_hits += n_kept_hits
 
             # Concatenate per-window arrays.
-            # These are NOT filtered because windows are kept even if they have zero selected hits.
+            # These are sliced only if max_windows cuts through this file.
             for key in PER_WINDOW_KEYS:
                 arr = data[key]
 
-                if arr.shape[0] != n_windows:
+                if arr.shape[0] != n_windows_in_file:
                     raise ValueError(
                         f"Per-window key {key} has wrong length in {npz_path}: "
-                        f"{arr.shape[0]} vs n_windows={n_windows}"
+                        f"{arr.shape[0]} vs n_windows={n_windows_in_file}"
                     )
+
+                arr = arr[:n_windows_to_take]
 
                 if key == "evt_file_idx":
                     # evt_file_idx points into the filenames array.
@@ -420,6 +495,10 @@ def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
                 per_window_parts[key].append(arr)
 
             # Concatenate filenames.
+            #
+            # We keep the full filenames array from any file that contributes
+            # at least one window. This is safe because evt_file_idx values still
+            # point into this combined filenames array.
             if FILENAMES_KEY in data.files:
                 filenames = data[FILENAMES_KEY]
                 combined_filenames.extend(filenames.tolist())
@@ -428,7 +507,25 @@ def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
                 combined_filenames.append(str(npz_path))
                 filename_offset += 1
 
-            total_windows += n_windows
+            total_windows += n_windows_to_take
+
+            if max_windows is not None and total_windows >= max_windows:
+                reached_window_limit = True
+                break
+
+    if total_windows == 0:
+        raise ValueError(
+            f"No windows/events were written for {output_path}. "
+            f"Check input_paths and evt_run arrays."
+        )
+
+    if max_windows is not None and total_windows != max_windows:
+        raise ValueError(
+            f"Could not write requested max_windows={max_windows} for {output_path}. "
+            f"Only {total_windows} windows/events were available."
+        )
+
+    print(f"[{output_path.name}] concatenating arrays...", flush=True)
 
     output = {}
 
@@ -439,7 +536,10 @@ def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
             output[key] = np.asarray([])
 
     for key in PER_WINDOW_KEYS:
-        output[key] = np.concatenate(per_window_parts[key], axis=0)
+        if per_window_parts[key]:
+            output[key] = np.concatenate(per_window_parts[key], axis=0)
+        else:
+            output[key] = np.asarray([])
 
     output[OFFSETS_KEY] = np.asarray(combined_offsets, dtype=np.int64)
 
@@ -470,6 +570,9 @@ def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
             f"channels_flat length {output['channels_flat'].shape[0]}"
         )
 
+    # Zero-hit windows/events are allowed.
+    # Therefore, do NOT require np.diff(offsets) > 0.
+
     if output["channels_flat"].size > 0:
         min_channel = int(output["channels_flat"].min())
         max_channel = int(output["channels_flat"].max())
@@ -489,14 +592,21 @@ def concatenate_npz_files(input_paths: List[Path], output_path: Path) -> None:
                     f"expected [{CHANNEL_START}, {CHANNEL_END})"
                 )
 
-    np.savez_compressed(output_path, **output)
+    print(f"[{output_path.name}] saving to disk...", flush=True)
 
-    print(f"[SAVED] {output_path}")
-    print(f"        windows: {total_windows}")
-    print(f"        selected flat entries: {total_kept_hits}")
-    print(f"        n_channels: {int(output[N_CHANNELS_KEY])}")
-    print(f"        channel range: [{CHANNEL_START}, {CHANNEL_END})")
-    print(f"        reindex channels: {REINDEX_CHANNELS}")
+    if COMPRESS_OUTPUT:
+        np.savez_compressed(output_path, **output)
+    else:
+        np.savez(output_path, **output)
+
+    print(f"[SAVED] {output_path}", flush=True)
+    print(f"        windows written: {total_windows}", flush=True)
+    print(f"        selected flat entries: {total_kept_hits}", flush=True)
+    print(f"        n_channels: {int(output[N_CHANNELS_KEY])}", flush=True)
+    print(f"        channel range: [{CHANNEL_START}, {CHANNEL_END})", flush=True)
+    print(f"        reindex channels: {REINDEX_CHANNELS}", flush=True)
+    print(f"        compressed output: {COMPRESS_OUTPUT}", flush=True)
+    print(f"        max_windows limit: {max_windows}", flush=True)
 
 
 def main() -> None:
@@ -530,6 +640,13 @@ def main() -> None:
 
     total_good_windows = sum(info["n_windows"] for info in good_infos)
     total_bad_windows = sum(info["n_windows"] for info in bad_infos)
+
+    explicit_good_infos = [
+        info
+        for info in good_infos
+        if info["run"] in GOOD_RUNS
+    ]
+
     default_good_infos = [
         info
         for info in good_infos
@@ -589,12 +706,12 @@ def main() -> None:
     print(f"Skipped/error files: {len(skipped_files)}")
     print("-" * 80)
     print(f"Good-run files: {len(good_infos)}")
-    print(f"Good-run windows: {total_good_windows}")
+    print(f"Good-run windows before channel filtering: {total_good_windows}")
     print(f"Bad-run files: {len(bad_infos)}")
-    print(f"Bad-run windows: {total_bad_windows}")
-    print(f"Explicit good-run files: {sum(1 for info in good_infos if info['run'] in GOOD_RUNS)}")
-    print(f"Default good-run (unknown) files: {len(default_good_infos)}")
-    print(f"Default good-run (unknown) windows: {total_default_good_windows}")
+    print(f"Bad-run windows before channel filtering: {total_bad_windows}")
+    print(f"Explicit good-run files: {len(explicit_good_infos)}")
+    print(f"Default good-run files: {len(default_good_infos)}")
+    print(f"Default good-run windows before channel filtering: {total_default_good_windows}")
     print("-" * 80)
     print("Channel selection")
     print("-" * 80)
@@ -603,28 +720,34 @@ def main() -> None:
     print(f"Number of selected channels: {CHANNEL_END - CHANNEL_START}")
     print(f"Reindex channels: {REINDEX_CHANNELS}")
     print("-" * 80)
-    print("Test selection")
+    print("Test selection before channel filtering")
     print("-" * 80)
     print(f"Bad files selected for test: {len(bad_infos)}")
-    print(f"Bad windows selected for test: {test_bad_windows}")
+    print(f"Bad windows selected for test before filtering: {test_bad_windows}")
     print(f"Good files selected for test: {len(selected_good_infos)}")
-    print(f"Good windows selected for test: {selected_good_windows}")
+    print(f"Good windows selected for test before filtering: {selected_good_windows}")
     print(f"Total test files: {len(test_infos)}")
-    print(f"Total test windows: {test_total_windows}")
+    print(f"Total test windows before filtering: {test_total_windows}")
     print("-" * 80)
-    print("Train selection")
+    print("Train selection before channel filtering")
     print("-" * 80)
     print(f"Total train files: {len(train_infos)}")
-    print(f"Total train windows: {train_total_windows}")
+    print(f"Total train windows before filtering: {train_total_windows}")
     print("=" * 80)
 
     if PRINT_FILES:
         print("\nTest files:")
         for info in test_infos:
-            label = "BAD" if info["run"] in BAD_RUNS else "GOOD"
+            if info["run"] in BAD_RUNS:
+                label = "BAD"
+            elif info["run"] in GOOD_RUNS:
+                label = "GOOD"
+            else:
+                label = "GOOD_DEFAULT"
+
             print(
                 f"  [{label}] run={info['run']} "
-                f"windows={info['n_windows']} "
+                f"windows_before_filtering={info['n_windows']} "
                 f"file_number={info['file_number']} "
                 f"path={info['path']}"
             )
@@ -636,11 +759,11 @@ def main() -> None:
             elif info["run"] in GOOD_RUNS:
                 label = "GOOD"
             else:
-                label = "UNKNOWN"
+                label = "GOOD_DEFAULT"
 
             print(
                 f"  [{label}] run={info['run']} "
-                f"windows={info['n_windows']} "
+                f"windows_before_filtering={info['n_windows']} "
                 f"file_number={info['file_number']} "
                 f"path={info['path']}"
             )
