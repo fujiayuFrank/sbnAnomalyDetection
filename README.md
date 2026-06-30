@@ -89,17 +89,19 @@ sbnAnomalyDetection/
 ├── run_multi_branch_inference.py       # Multi-branch inference runner
 ├── npz_npy_reader.py                   # Inspect .npz/.npy files
 ├── tests/
+│   └──...
+├── train_test_from_npz.py              # make train and test dataset directly from npz files
 ├── graphing/
-│    ├── plot_sweep_metrics.py          # Plot threshold_metrics_summary.csv sweep metrics
-│    ├── plot_wrapper.C                 # hits2.h.integral histogram plotter
-│    ├── plot_wrapper.py
-│    ├── plot_materialize_window.py     # materialize_window .npz file plotter
-│    ├── plot_channelhist.C             # hits2.h.channel histogram plotter
-│    ├── plot_channelhist.py
-│    ├── plot_channel_time.C            # per channel integral value with time line chart plotter
-│    ├── plot_inference_result.py       # model inference score histogram plotter
-│    ├── plot_sweep_metrics.py          # Plot the performance of the models in gnn sweep 
-│    └── plot_good_bad_scores.py        # Plot the histogram of the anomaly scores of good/bad windows/runs
+│   ├── plot_sweep_metrics.py           # Plot threshold_metrics_summary.csv sweep metrics
+│   ├── plot_wrapper.C                  # hits2.h.integral histogram plotter
+│   ├── plot_wrapper.py
+│   ├── plot_materialize_window.py      # materialize_window .npz file plotter
+│   ├── plot_channelhist.C              # hits2.h.channel histogram plotter
+│   ├── plot_channelhist.py
+│   ├── plot_channel_time.C             # per channel integral value with time line chart plotter
+│   ├── plot_inference_result.py        # model inference score histogram plotter
+│   ├── plot_sweep_metrics.py           # Plot the performance of the models in gnn sweep 
+│   └── plot_good_bad_scores.py         # Plot the histogram of the anomaly scores of good/bad windows/runs
 └── pyproject.toml
 ```
 
