@@ -1,8 +1,124 @@
 #!/usr/bin/env python3
+"""
+Generate GNN sweep YAML configuration files.
+
+This script reads one base YAML file, modifies selected sweep parameters,
+and writes one YAML config per parameter combination. Each generated config
+gets its own run name, checkpoint directory, final model path, and inference
+output path.
+
+Typical usage
+-------------
+Run the default sweep using the values set in this file:
+
+    python generate_gnn_sweep.py
+
+Run the sweep while forcing stride = window_size for every window size:
+
+    python generate_gnn_sweep.py --same-stride
+
+Input / output settings
+-----------------------
+BASE_YAML_PATH:
+    Path to the base YAML config that will be copied and modified.
+
+OUTPUT_YAML_DIR:
+    Directory where generated YAML files will be written.
+
+START_INDEX:
+    Starting integer index used in generated YAML filenames and run names.
+    For example, START_INDEX = 121 produces names starting with 0121_....
+
+Sweep settings
+--------------
+WINDOW_SIZES:
+    List of data.window_size values to test.
+
+STRIDES:
+    List of data.stride values to test.
+    This list is ignored when --same-stride is used.
+
+HISTORIES:
+    List of model.history values to test.
+
+BATCH_SIZES:
+    List of training.batch_size values to test.
+
+LEARNING_RATES:
+    List of training.lr values to test.
+
+The sweep uses a full Cartesian product:
+
+    WINDOW_SIZES × STRIDES × HISTORIES × BATCH_SIZES × LEARNING_RATES
+
+When --same-stride is used, the sweep becomes:
+
+    for each window_size:
+        stride = window_size
+
+    WINDOW_SIZES × HISTORIES × BATCH_SIZES × LEARNING_RATES
+
+Default training settings
+-------------------------
+DEFAULT_WEIGHT_DECAY:
+    Value written to training.weight_decay for every generated config.
+
+DEFAULT_MAX_EPOCHS:
+    Value written to training.max_epochs for every generated config.
+
+Run naming / checkpoint settings
+--------------------------------
+RUN_PREFIX:
+    Name prefix reserved for generated runs.
+    Currently this variable is defined for clarity, but the actual run name
+    is produced by make_run_name() using index, window size, stride, history,
+    batch size, and learning rate.
+
+CHECKPOINT_BASE_DIR:
+    Base directory where each generated run's checkpoint folder is placed.
+
+Each generated run gets paths like:
+
+    checkpoints/gnn/<run_name>/gnn_final.pt
+    checkpoints/gnn/<run_name>/inference_scores.npz
+
+Validation behavior
+-------------------
+The script skips invalid combinations where:
+
+    stride > window_size
+    history < 1
+
+It also checks that BATCH_SIZES and LEARNING_RATES are not empty.
+
+Command-line flags
+------------------
+--same-stride:
+    Ignore the STRIDES list and automatically set stride = window_size
+    for every window size in WINDOW_SIZES.
+
+Example
+-------
+If:
+
+    WINDOW_SIZES = [500, 1000]
+    STRIDES = [100, 250, 500]
+
+Then normal mode tests:
+
+    500 with strides 100, 250, 500
+    1000 with strides 100, 250, 500
+
+But with --same-stride, it tests only:
+
+    window_size=500, stride=500
+    window_size=1000, stride=1000
+"""
 
 from pathlib import Path
 from itertools import product
 import copy
+import argparse
 import yaml
 
 
@@ -41,6 +157,27 @@ RUN_PREFIX = "gnn_sweep"
 
 # Project-relative checkpoint base directory
 CHECKPOINT_BASE_DIR = Path("checkpoints/gnn")
+
+
+# ============================================================
+# CLI arguments
+# ============================================================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate GNN sweep YAML configs."
+    )
+
+    parser.add_argument(
+        "--same-stride",
+        action="store_true",
+        help=(
+            "Ignore STRIDES and automatically set stride = window_size "
+            "for every window size in the sweep."
+        ),
+    )
+
+    return parser.parse_args()
 
 
 # ============================================================
@@ -158,6 +295,8 @@ def make_config(
 
 
 def main() -> None:
+    args = parse_args()
+
     validate_training_sweep_lists()
 
     OUTPUT_YAML_DIR.mkdir(parents=True, exist_ok=True)
@@ -168,59 +307,64 @@ def main() -> None:
     generated = 0
     skipped = 0
 
-    for window_size, stride, history, batch_size, lr in product(
-        WINDOW_SIZES,
-        STRIDES,
-        HISTORIES,
-        BATCH_SIZES,
-        LEARNING_RATES,
-    ):
-        if stride > window_size:
-            print(
-                f"Skipping invalid combination: "
-                f"window_size={window_size}, stride={stride}, history={history}, "
-                f"batch_size={batch_size}, lr={lr} "
-                f"(stride must be <= window_size)"
+    for window_size in WINDOW_SIZES:
+        if args.same_stride:
+            stride_values = [window_size]
+        else:
+            stride_values = STRIDES
+
+        for stride, history, batch_size, lr in product(
+            stride_values,
+            HISTORIES,
+            BATCH_SIZES,
+            LEARNING_RATES,
+        ):
+            if stride > window_size:
+                print(
+                    f"Skipping invalid combination: "
+                    f"window_size={window_size}, stride={stride}, history={history}, "
+                    f"batch_size={batch_size}, lr={lr} "
+                    f"(stride must be <= window_size)"
+                )
+                skipped += 1
+                continue
+
+            if history < 1:
+                print(
+                    f"Skipping invalid combination: "
+                    f"window_size={window_size}, stride={stride}, history={history}, "
+                    f"batch_size={batch_size}, lr={lr} "
+                    f"(history must be >= 1 for forecasting)"
+                )
+                skipped += 1
+                continue
+
+            run_name = make_run_name(
+                index=index,
+                window_size=window_size,
+                stride=stride,
+                history=history,
+                batch_size=batch_size,
+                lr=lr,
             )
-            skipped += 1
-            continue
 
-        if history < 1:
-            print(
-                f"Skipping invalid combination: "
-                f"window_size={window_size}, stride={stride}, history={history}, "
-                f"batch_size={batch_size}, lr={lr} "
-                f"(history must be >= 1 for forecasting)"
+            cfg = make_config(
+                base_config=base_config,
+                run_name=run_name,
+                window_size=window_size,
+                stride=stride,
+                history=history,
+                batch_size=batch_size,
+                lr=lr,
             )
-            skipped += 1
-            continue
 
-        run_name = make_run_name(
-            index=index,
-            window_size=window_size,
-            stride=stride,
-            history=history,
-            batch_size=batch_size,
-            lr=lr,
-        )
+            output_yaml_path = OUTPUT_YAML_DIR / f"{run_name}.yaml"
+            save_yaml(cfg, output_yaml_path)
 
-        cfg = make_config(
-            base_config=base_config,
-            run_name=run_name,
-            window_size=window_size,
-            stride=stride,
-            history=history,
-            batch_size=batch_size,
-            lr=lr,
-        )
+            print(f"Wrote {output_yaml_path}")
 
-        output_yaml_path = OUTPUT_YAML_DIR / f"{run_name}.yaml"
-        save_yaml(cfg, output_yaml_path)
-
-        print(f"Wrote {output_yaml_path}")
-
-        index += 1
-        generated += 1
+            index += 1
+            generated += 1
 
     print()
     print(f"Generated {generated} YAML files in {OUTPUT_YAML_DIR}")
