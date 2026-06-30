@@ -548,7 +548,7 @@ def concatenate_npz_files(
     else:
         output[N_CHANNELS_KEY] = np.asarray(original_n_channels_value)
 
-    output[FILENAMES_KEY] = np.asarray(combined_filenames, dtype=object)
+    output[FILENAMES_KEY] = np.asarray([str(f) for f in combined_filenames], dtype=str)
 
     # Final consistency checks
     if output["evt_run"].shape[0] != total_windows:
