@@ -13,8 +13,10 @@ Each NPZ should contain at least:
 
 For every model directory, this script:
   1. reads inference_scores.npz
-  2. normalizes scores and scores_max with tanh or sigmoid
-  3. applies each threshold in THRESHOLDS, where each threshold is in [0, 1]
+  2. transforms scores and scores_max according to NORMALIZATION_MODE
+  3. applies each threshold in THRESHOLDS
+     - for tanh/sigmoid/global_max, thresholds are normalized values in [0, 1]
+     - for none, thresholds are absolute raw score values
   4. evaluates window-level predictions against known good/bad run labels
   5. writes a compact per-model metrics CSV by default
   6. writes detailed full/per-run CSV files only with --full-summary
@@ -88,8 +90,9 @@ Example usage:
 Definitions:
   - true bad window: first_run is in bad_runs
   - true good window: first_run is in good_runs
-  - predicted bad: normalized score > threshold
-  - predicted good: normalized score < threshold
+  - predicted bad: transformed score > threshold
+  - predicted good: transformed score < threshold
+  - when NORMALIZATION_MODE = "none", the transformed score is the raw score
   - values exactly equal to threshold are controlled by equal_is_bad
 
 Confusion matrix convention:
@@ -152,7 +155,7 @@ PLOT_GOOD_BAD_DISTRIBUTION_EXTRA_ARGS: list[str] = []
 
 # Choose normalization transform.
 # Options: "tanh", "sigmoid", "global_max", "none"
-NORMALIZATION_MODE = "tanh"
+NORMALIZATION_MODE = "none"
 
 # Scope used to determine the transform scale.
 # "per_model": each model's scores are normalized using only that model's NPZ values.
@@ -172,10 +175,13 @@ MANUAL_SCORE_MAX_SCALE = 1.0
 # This keeps the threshold range exactly meaningful as [0, 1].
 RESCALE_TRANSFORM_TO_UNIT_MAX = True
 
-# Classification thresholds after normalization.
-# predicted bad if normalized value > threshold by default.
+# Classification thresholds.
+# predicted bad if transformed value > threshold by default.
+# For NORMALIZATION_MODE in {"tanh", "sigmoid", "global_max"}, thresholds are normalized
+# values and must be in [0, 1].
+# For NORMALIZATION_MODE = "none", thresholds are absolute raw score values.
 # The script evaluates every model at every threshold in this list.
-THRESHOLDS = [0.5]
+THRESHOLDS = [10000000]
 
 # What to do with values exactly equal to the threshold.
 # False: value == threshold is predicted good.
@@ -235,7 +241,7 @@ def stable_sigmoid_shifted(z: np.ndarray) -> np.ndarray:
     return 2.0 / (1.0 + np.exp(-z_clip)) - 1.0
 
 
-def transform_to_0_1(
+def transform_scores(
     values: np.ndarray,
     *,
     mode: str,
@@ -243,14 +249,16 @@ def transform_to_0_1(
     reference_max: float,
     rescale_to_unit_max: bool = True,
 ) -> np.ndarray:
-    """Normalize values to a [0, 1]-like score.
+    """Transform scores for thresholding.
 
     For nonnegative anomaly scores:
-      - global_max: x / reference_max
+      - none: raw x, so thresholds are absolute raw score values
+      - global_max: x / reference_max, so thresholds are in [0, 1]
       - tanh: tanh(x / scale), optionally divided by tanh(reference_max / scale)
       - sigmoid: 2*sigmoid(x / scale)-1, optionally divided by transform(reference_max)
 
-    The optional final division makes the largest reference value map to exactly 1.
+    For tanh/sigmoid/global_max, the optional final division makes the largest
+    reference value map to exactly 1.
     """
     x = np.asarray(values, dtype=float)
     out = np.full_like(x, np.nan, dtype=float)
@@ -313,11 +321,15 @@ def choose_scale(values: np.ndarray, *, scale_mode: str, percentile: float, manu
     )
 
 
-def predict_bad(normalized_values: np.ndarray, threshold: float, *, equal_is_bad: bool) -> np.ndarray:
-    """Return boolean predicted-bad mask."""
+def predict_bad(transformed_values: np.ndarray, threshold: float, *, equal_is_bad: bool) -> np.ndarray:
+    """Return boolean predicted-bad mask.
+
+    transformed_values are raw scores when NORMALIZATION_MODE == "none", and
+    normalized values when NORMALIZATION_MODE is tanh/sigmoid/global_max.
+    """
     if equal_is_bad:
-        return normalized_values >= threshold
-    return normalized_values > threshold
+        return transformed_values >= threshold
+    return transformed_values > threshold
 
 
 # ============================================================
@@ -524,7 +536,8 @@ def write_empty_compact_summary_csv(path: Path) -> None:
         "learning_rate",
         "method",
         "threshold",
-        "normalization_model",
+        "normalization_mode",
+        "threshold_units",
         "TP", "TN", "FP", "FN",
         "precision", "recall", "F1", "accuracy",
     ]
@@ -808,8 +821,25 @@ def sort_rows_by_metric(rows: list[dict], metric: str | None) -> list[dict]:
     return sorted(rows, key=sort_key)
 
 
+def threshold_uses_raw_scores() -> bool:
+    """Return True when thresholds should be interpreted in raw score units."""
+    return NORMALIZATION_MODE == "none"
+
+
+def threshold_unit_label() -> str:
+    """Human-readable label for threshold units."""
+    if threshold_uses_raw_scores():
+        return "raw_score_absolute"
+    return "normalized_0_to_1"
+
+
 def get_thresholds() -> list[float]:
-    """Return the user-configured thresholds as a validated float list."""
+    """Return the user-configured thresholds as a validated float list.
+
+    Threshold meaning depends on NORMALIZATION_MODE:
+      - none: absolute raw score values; only finiteness is required
+      - tanh/sigmoid/global_max: normalized values in [0, 1]
+    """
     try:
         thresholds = list(THRESHOLDS)
     except TypeError:
@@ -819,9 +849,20 @@ def get_thresholds() -> list[float]:
         raise ValueError("THRESHOLDS must contain at least one threshold")
 
     thresholds = [float(t) for t in thresholds]
-    for threshold in thresholds:
-        if not (0.0 <= threshold <= 1.0):
-            raise ValueError(f"Every threshold in THRESHOLDS must be between 0 and 1; got {threshold}")
+
+    if threshold_uses_raw_scores():
+        for threshold in thresholds:
+            if not np.isfinite(threshold):
+                raise ValueError(
+                    f"Every raw-score threshold in THRESHOLDS must be finite; got {threshold}"
+                )
+    else:
+        for threshold in thresholds:
+            if not (0.0 <= threshold <= 1.0):
+                raise ValueError(
+                    "Every normalized threshold in THRESHOLDS must be between 0 and 1 "
+                    f"when NORMALIZATION_MODE={NORMALIZATION_MODE!r}; got {threshold}"
+                )
 
     return thresholds
 
@@ -912,14 +953,14 @@ def prepare_model_arrays(
         score_ref_max = global_score_ref_max
         score_max_ref_max = global_score_max_ref_max
 
-    norm_scores = transform_to_0_1(
+    norm_scores = transform_scores(
         scores,
         mode=NORMALIZATION_MODE,
         scale=score_scale,
         reference_max=score_ref_max,
         rescale_to_unit_max=RESCALE_TRANSFORM_TO_UNIT_MAX,
     )
-    norm_scores_max = transform_to_0_1(
+    norm_scores_max = transform_scores(
         scores_max,
         mode=NORMALIZATION_MODE,
         scale=score_max_scale,
@@ -978,6 +1019,7 @@ def append_metrics_for_model_threshold(
             "normalization_mode": NORMALIZATION_MODE,
             "normalization_scope": NORMALIZATION_SCOPE,
             "normalization_scale_mode": NORMALIZATION_SCALE_MODE,
+            "threshold_units": threshold_unit_label(),
             "score_scale": prepared["score_scale"],
             "score_max_scale": prepared["score_max_scale"],
             "score_reference_max": prepared["score_ref_max"],
@@ -1054,6 +1096,7 @@ def main() -> int:
     print(f"NORMALIZATION_SCOPE       = {NORMALIZATION_SCOPE}")
     print(f"NORMALIZATION_SCALE_MODE  = {NORMALIZATION_SCALE_MODE}")
     print(f"THRESHOLDS                = {thresholds}")
+    print(f"THRESHOLD_UNITS           = {threshold_unit_label()}")
     if args.scores_only:
         method_selection = "scores_only"
     elif args.scores_max_only:
@@ -1181,7 +1224,8 @@ def main() -> int:
         "learning_rate",
         "method",
         "threshold",
-        "normalization_model",
+        "normalization_mode",
+        "threshold_units",
         "TP", "TN", "FP", "FN",
         "precision", "recall", "F1", "accuracy",
     ]
@@ -1190,6 +1234,7 @@ def main() -> int:
     full_summary_fields = [
         "model_name", "batch_size", "learning_rate", "method", "threshold",
         "normalization_mode", "normalization_scope", "normalization_scale_mode",
+        "threshold_units",
         "score_scale", "score_max_scale", "score_reference_max", "score_max_reference_max",
         "n_windows_total", "n_windows_evaluated", "n_true_good_windows", "n_true_bad_windows",
         "TP", "TN", "FP", "FN",
@@ -1210,7 +1255,9 @@ def main() -> int:
             "learning_rate": row["learning_rate"],
             "method": row["method"],
             "threshold": row["threshold"],
-            "normalization_model": row["normalization_mode"],
+            # Backward-compatible alias expected by graphing/plot_sweep_metrics.py.
+            "normalization_mode": row["normalization_mode"],
+            "threshold_units": row["threshold_units"],
             "TP": row["TP"],
             "TN": row["TN"],
             "FP": row["FP"],

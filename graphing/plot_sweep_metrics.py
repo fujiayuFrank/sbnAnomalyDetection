@@ -18,7 +18,7 @@ CSV summary files are saved only when --plot-summary is given.
 
 Expected CSV columns:
 
-    model_name, method, threshold, normalization_model,
+    model_name, method, threshold, normalization_mode,
     TP, TN, FP, FN,
     precision, recall, F1, accuracy
 
@@ -134,8 +134,8 @@ METHOD = None
 THRESHOLD = None
 # THRESHOLD = 0.5
 
-NORMALIZATION_MODEL = None
-# NORMALIZATION_MODEL = "tanh"
+NORMALIZATION_MODE = None
+# NORMALIZATION_MODE = "tanh"
 
 # Metrics to plot. TP/TN/FP/FN are intentionally ignored.
 PLOT_METRICS = ["accuracy", "precision", "recall", "F1"]
@@ -178,7 +178,7 @@ REQUIRED_COLUMNS = {
     "model_name",
     "method",
     "threshold",
-    "normalization_model",
+    "normalization_mode",
     "TP",
     "TN",
     "FP",
@@ -197,7 +197,7 @@ MODEL_VARIABLES = ["window_size", "window_stride", "history"]
 # New training-setting variables.
 TRAINING_VARIABLES = ["batch_size", "learning_rate"]
 
-CONTEXT_COLUMNS = ["method", "normalization_model", "threshold"]
+CONTEXT_COLUMNS = ["method", "normalization_mode", "threshold"]
 
 
 def find_csv_files(input_path: Path) -> list[Path]:
@@ -318,7 +318,7 @@ def filter_dataframe(
     df: pd.DataFrame,
     method: str | None,
     threshold: float | None,
-    normalization_model: str | None,
+    normalization_mode: str | None,
 ) -> pd.DataFrame:
     """Apply optional filters."""
     out = df.copy()
@@ -329,8 +329,8 @@ def filter_dataframe(
     if threshold is not None:
         out = out[out["threshold"].astype(float) == float(threshold)]
 
-    if normalization_model is not None:
-        out = out[out["normalization_model"] == normalization_model]
+    if normalization_mode is not None:
+        out = out[out["normalization_mode"] == normalization_mode]
 
     if out.empty:
         raise ValueError("No rows remain after filtering.")
@@ -464,7 +464,7 @@ def plot_relation_for_fixed_pair(
         vary_var = "window_size"
 
     This creates one plot for every combination of:
-        method, normalization_model, threshold, fixed_var_1 value, fixed_var_2 value
+        method, normalization_mode, threshold, fixed_var_1 value, fixed_var_2 value
     """
     metric_dir = output_dir / "02_metric_relations" / safe_name(metric) / f"vary_{vary_var}"
     metric_dir.mkdir(parents=True, exist_ok=True)
@@ -680,7 +680,7 @@ def save_clean_dataframe(df: pd.DataFrame, output_dir: Path) -> None:
         "model_name",
         "method",
         "threshold",
-        "normalization_model",
+        "normalization_mode",
         "window_size",
         "window_stride",
         "history",
@@ -723,7 +723,7 @@ def print_summary(
 
     print()
     print("Available normalization models in filtered data:")
-    for value in sorted(df["normalization_model"].dropna().unique()):
+    for value in sorted(df["normalization_mode"].dropna().unique()):
         print(f"  {value}")
 
     print()
@@ -751,7 +751,7 @@ def print_summary(
         "model_name",
         "method",
         "threshold",
-        "normalization_model",
+        "normalization_mode",
         "window_size",
         "window_stride",
         "history",
@@ -840,7 +840,7 @@ def main() -> int:
         df,
         method=effective_method,
         threshold=THRESHOLD,
-        normalization_model=NORMALIZATION_MODEL,
+        normalization_mode=NORMALIZATION_MODE,
     )
 
     df = make_numeric(df)
