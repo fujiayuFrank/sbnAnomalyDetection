@@ -61,6 +61,29 @@ MAX_TRAIN_WINDOW_NUM = None
 # MAX_TRAIN_WINDOW_NUM = 100000
 
 
+# If None:
+#   use the original behavior:
+#   select all bad-run files for test, randomly select enough good-run files
+#   to approximately match the bad-window count, and put everything else
+#   into the training set.
+#
+# If an integer:
+#   first reserve good-run files for training until at least this many good
+#   windows/events are available for training. Then the test set is built
+#   only from the remaining good-run files and the bad-run files.
+#
+#   In this mode, if there are not enough remaining good windows to match all
+#   bad windows, or not enough bad windows to match all remaining good windows,
+#   the script uses the lower available window count as the target for each
+#   test class.
+#
+# Note:
+#   File selection is whole-file based, so final selected counts can be a bit
+#   above the target if the last selected file crosses the target.
+MIN_TRAIN_WINDOW_NUM = 100000
+# MIN_TRAIN_WINDOW_NUM = 100000
+
+
 # If True:
 #   original channels 9600, 9601, ..., 9649 become 0, 1, ..., 49
 #   and n_channels is saved as CHANNEL_END - CHANNEL_START.
@@ -246,6 +269,78 @@ def select_good_files_for_test(
     rng = np.random.default_rng(random_seed)
 
     shuffled = list(good_infos)
+    rng.shuffle(shuffled)
+
+    selected = []
+    selected_windows = 0
+
+    for info in shuffled:
+        selected.append(info)
+        selected_windows += info["n_windows"]
+
+        if selected_windows >= target_windows:
+            break
+
+    return selected
+
+
+def select_files_until_min_windows(
+    infos: List[Dict],
+    min_windows: int,
+) -> List[Dict]:
+    """
+    Select whole files in sorted order until at least min_windows are reached.
+
+    This is used to reserve good-run files for training before constructing
+    the test set when MIN_TRAIN_WINDOW_NUM is enabled.
+
+    This selects whole .npz files, never partial files.
+    """
+    min_windows = int(min_windows)
+
+    if min_windows <= 0:
+        raise ValueError(f"min_windows must be positive or None, got {min_windows}")
+
+    selected = []
+    selected_windows = 0
+
+    for info in sort_infos_by_run_then_file(infos):
+        selected.append(info)
+        selected_windows += info["n_windows"]
+
+        if selected_windows >= min_windows:
+            break
+
+    if selected_windows < min_windows:
+        raise ValueError(
+            f"Could not reserve the requested minimum training windows. "
+            f"Requested MIN_TRAIN_WINDOW_NUM={min_windows}, "
+            f"but only {selected_windows} good-run windows are available."
+        )
+
+    return selected
+
+
+def select_files_for_window_target(
+    infos: List[Dict],
+    target_windows: int,
+    random_seed: int,
+) -> List[Dict]:
+    """
+    Randomly select whole files until reaching target_windows.
+
+    This is used for class-balanced test selection when MIN_TRAIN_WINDOW_NUM
+    is enabled. Because files are selected whole, the final selected window
+    count may be slightly larger than target_windows.
+    """
+    target_windows = int(target_windows)
+
+    if target_windows <= 0:
+        return []
+
+    rng = np.random.default_rng(random_seed)
+
+    shuffled = list(infos)
     rng.shuffle(shuffled)
 
     selected = []
@@ -655,26 +750,110 @@ def main() -> None:
 
     total_default_good_windows = sum(info["n_windows"] for info in default_good_infos)
 
-    # Select good files for test.
-    selected_good_infos = select_good_files_for_test(
-        good_infos=good_infos,
-        target_windows=total_bad_windows,
-        random_seed=RANDOM_SEED,
-    )
+    if MIN_TRAIN_WINDOW_NUM is None:
+        # Original behavior:
+        #   - all bad-run files go to test
+        #   - randomly select enough good-run files to approximately match
+        #     the total bad-window count
+        #   - everything else goes to train
+        selected_bad_infos = list(bad_infos)
 
-    selected_good_paths = {info["path"] for info in selected_good_infos}
-    bad_paths = {info["path"] for info in bad_infos}
+        selected_good_infos = select_good_files_for_test(
+            good_infos=good_infos,
+            target_windows=total_bad_windows,
+            random_seed=RANDOM_SEED,
+        )
 
-    test_paths_set = selected_good_paths | bad_paths
+        selected_good_paths = {info["path"] for info in selected_good_infos}
+        selected_bad_paths = {info["path"] for info in selected_bad_infos}
 
-    # Everything not selected for test goes to train.
-    train_infos = [
-        info
-        for info in all_infos
-        if info["path"] not in test_paths_set
-    ]
+        test_paths_set = selected_good_paths | selected_bad_paths
 
-    test_infos = bad_infos + selected_good_infos
+        # Everything not selected for test goes to train.
+        train_infos = [
+            info
+            for info in all_infos
+            if info["path"] not in test_paths_set
+        ]
+
+        test_infos = selected_bad_infos + selected_good_infos
+
+        remaining_good_windows_after_train_reserve = None
+        test_target_windows_per_class = None
+
+    else:
+        # New behavior:
+        #   1. Reserve good-run files for training until MIN_TRAIN_WINDOW_NUM
+        #      is reached.
+        #   2. Build the test set only from the remaining good-run files and
+        #      bad-run files.
+        #   3. Use the lower of remaining-good windows and available-bad
+        #      windows as the per-class test target.
+        if MAX_TRAIN_WINDOW_NUM is not None and MAX_TRAIN_WINDOW_NUM < MIN_TRAIN_WINDOW_NUM:
+            raise ValueError(
+                f"MAX_TRAIN_WINDOW_NUM={MAX_TRAIN_WINDOW_NUM} is smaller than "
+                f"MIN_TRAIN_WINDOW_NUM={MIN_TRAIN_WINDOW_NUM}. "
+                f"This would cap the written training set below the requested minimum."
+            )
+
+        reserved_train_good_infos = select_files_until_min_windows(
+            infos=good_infos,
+            min_windows=MIN_TRAIN_WINDOW_NUM,
+        )
+
+        reserved_train_good_paths = {
+            info["path"]
+            for info in reserved_train_good_infos
+        }
+
+        remaining_good_infos = [
+            info
+            for info in good_infos
+            if info["path"] not in reserved_train_good_paths
+        ]
+
+        remaining_good_windows_after_train_reserve = sum(
+            info["n_windows"]
+            for info in remaining_good_infos
+        )
+        available_bad_windows = sum(info["n_windows"] for info in bad_infos)
+
+        test_target_windows_per_class = min(
+            remaining_good_windows_after_train_reserve,
+            available_bad_windows,
+        )
+
+        if test_target_windows_per_class <= 0:
+            raise ValueError(
+                "Could not build a balanced test set after reserving the minimum "
+                "training windows. Either no good windows remain for test, or no "
+                "bad windows are available."
+            )
+
+        selected_good_infos = select_files_for_window_target(
+            infos=remaining_good_infos,
+            target_windows=test_target_windows_per_class,
+            random_seed=RANDOM_SEED,
+        )
+
+        selected_bad_infos = select_files_for_window_target(
+            infos=bad_infos,
+            target_windows=test_target_windows_per_class,
+            random_seed=RANDOM_SEED + 1,
+        )
+
+        selected_good_paths = {info["path"] for info in selected_good_infos}
+        selected_bad_paths = {info["path"] for info in selected_bad_infos}
+
+        # In the new mode, train contains only good-run files.
+        # Bad-run files not selected for test are intentionally unused.
+        train_infos = [
+            info
+            for info in good_infos
+            if info["path"] not in selected_good_paths
+        ]
+
+        test_infos = selected_bad_infos + selected_good_infos
 
     # Sort so runs are never interleaved, and files inside each run are ordered.
     test_infos = sort_infos_by_run_then_file(test_infos)
@@ -684,7 +863,7 @@ def main() -> None:
     train_paths = [info["path"] for info in train_infos]
 
     selected_good_windows = sum(info["n_windows"] for info in selected_good_infos)
-    test_bad_windows = sum(info["n_windows"] for info in bad_infos)
+    test_bad_windows = sum(info["n_windows"] for info in selected_bad_infos)
     test_total_windows = sum(info["n_windows"] for info in test_infos)
     train_total_windows = sum(info["n_windows"] for info in train_infos)
 
@@ -720,9 +899,17 @@ def main() -> None:
     print(f"Number of selected channels: {CHANNEL_END - CHANNEL_START}")
     print(f"Reindex channels: {REINDEX_CHANNELS}")
     print("-" * 80)
+    print("Train/test sizing settings")
+    print("-" * 80)
+    print(f"Minimum training windows setting: {MIN_TRAIN_WINDOW_NUM}")
+    print(f"Max training windows output cap: {MAX_TRAIN_WINDOW_NUM}")
+    if test_target_windows_per_class is not None:
+        print(f"Remaining good windows after training reserve: {remaining_good_windows_after_train_reserve}")
+        print(f"Test target windows per class: {test_target_windows_per_class}")
+    print("-" * 80)
     print("Test selection before channel filtering")
     print("-" * 80)
-    print(f"Bad files selected for test: {len(bad_infos)}")
+    print(f"Bad files selected for test: {len(selected_bad_infos)}")
     print(f"Bad windows selected for test before filtering: {test_bad_windows}")
     print(f"Good files selected for test: {len(selected_good_infos)}")
     print(f"Good windows selected for test before filtering: {selected_good_windows}")
@@ -774,7 +961,7 @@ def main() -> None:
     print("=" * 80)
 
     concatenate_npz_files(test_paths, TEST_OUTPUT_PATH)
-    concatenate_npz_files(train_paths, TRAIN_OUTPUT_PATH)
+    concatenate_npz_files(train_paths, TRAIN_OUTPUT_PATH, max_windows=MAX_TRAIN_WINDOW_NUM)
 
     print("=" * 80)
     print("Done")
