@@ -155,7 +155,7 @@ PLOT_GOOD_BAD_DISTRIBUTION_EXTRA_ARGS: list[str] = []
 
 # Choose normalization transform.
 # Options: "tanh", "sigmoid", "global_max", "none"
-NORMALIZATION_MODE = "tanh"
+NORMALIZATION_MODE = "none"
 
 # Scope used to determine the transform scale.
 # "per_model": each model's scores are normalized using only that model's NPZ values.
@@ -181,7 +181,7 @@ RESCALE_TRANSFORM_TO_UNIT_MAX = True
 # values and must be in [0, 1].
 # For NORMALIZATION_MODE = "none", thresholds are absolute raw score values.
 # The script evaluates every model at every threshold in this list.
-THRESHOLDS = [0.5]
+THRESHOLDS = [10000000]
 
 # What to do with values exactly equal to the threshold.
 # False: value == threshold is predicted good.

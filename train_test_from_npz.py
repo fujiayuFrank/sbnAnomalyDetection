@@ -46,17 +46,19 @@ COMPRESS_OUTPUT = False
 #   CHANNEL_END   = 9650
 #
 # This keeps exactly 50 channels: 9600, 9601, ..., 9649.
-CHANNEL_START = 9600
-CHANNEL_END = 9650
+CHANNEL_START = 8800
+CHANNEL_END = 9000
 
 
 # If None:
-#   use all remaining training files, same behavior as before.
+#   use all selected training runs.
 #
 # If an integer:
-#   write exactly this many windows/events into windows_train.npz.
-#   The script will use train files in sorted order and, if needed, take
-#   only the first part of the last file to hit this exact window count.
+#   cap the training set at approximately this many windows/events, while
+#   keeping whole runs together. Because runs are never split, the final
+#   training count may be below this cap. If the minimum training selection
+#   already exceeds this cap, the script raises an error instead of slicing
+#   through a run.
 MAX_TRAIN_WINDOW_NUM = None
 # MAX_TRAIN_WINDOW_NUM = 100000
 
@@ -78,8 +80,9 @@ MAX_TRAIN_WINDOW_NUM = None
 #   test class.
 #
 # Note:
-#   File selection is whole-file based, so final selected counts can be a bit
-#   above the target if the last selected file crosses the target.
+#   Run selection is whole-run based, so final selected counts can be a bit
+#   above the target if the last selected run crosses the target. No run is
+#   split between train and test.
 MIN_TRAIN_WINDOW_NUM = 100000
 # MIN_TRAIN_WINDOW_NUM = 100000
 
@@ -250,6 +253,214 @@ def sort_infos_by_run_then_file(infos: List[Dict]) -> List[Dict]:
         ),
     )
 
+
+
+
+def group_infos_by_run(infos: List[Dict]) -> List[Dict]:
+    """
+    Group file-level info dictionaries by run.
+
+    Returns a list of run groups:
+      {
+        "run": int,
+        "infos": List[Dict],
+        "n_windows": int,
+      }
+
+    Each group's infos are sorted by run/file order. Keeping these groups
+    together prevents a run from being split between train and test.
+    """
+    groups_by_run = {}
+
+    for info in infos:
+        groups_by_run.setdefault(info["run"], []).append(info)
+
+    run_groups = []
+
+    for run, run_infos in groups_by_run.items():
+        sorted_run_infos = sort_infos_by_run_then_file(run_infos)
+        run_groups.append(
+            {
+                "run": run,
+                "infos": sorted_run_infos,
+                "n_windows": sum(info["n_windows"] for info in sorted_run_infos),
+            }
+        )
+
+    return sort_run_groups(run_groups)
+
+
+def sort_run_groups(run_groups: List[Dict]) -> List[Dict]:
+    """Sort run groups by run number."""
+    return sorted(run_groups, key=lambda group: group["run"])
+
+
+def flatten_run_groups(run_groups: List[Dict]) -> List[Dict]:
+    """Flatten run groups back to file-level info dictionaries."""
+    flattened = []
+
+    for group in sort_run_groups(run_groups):
+        flattened.extend(sort_infos_by_run_then_file(group["infos"]))
+
+    return flattened
+
+
+def shuffle_run_groups(run_groups: List[Dict], random_seed: int) -> List[Dict]:
+    """Return a reproducibly shuffled copy of run groups."""
+    rng = np.random.default_rng(random_seed)
+    shuffled = list(run_groups)
+    rng.shuffle(shuffled)
+    return shuffled
+
+
+def select_run_groups_until_min_windows(
+    run_groups: List[Dict],
+    min_windows: int,
+    random_seed: int,
+) -> List[Dict]:
+    """
+    Select whole runs until at least min_windows are reached.
+
+    The random choice happens at the run level, not at the file level.
+    Therefore, all files from a selected run stay together.
+    """
+    min_windows = int(min_windows)
+
+    if min_windows <= 0:
+        raise ValueError(f"min_windows must be positive or None, got {min_windows}")
+
+    selected = []
+    selected_windows = 0
+
+    for group in shuffle_run_groups(run_groups, random_seed):
+        selected.append(group)
+        selected_windows += group["n_windows"]
+
+        if selected_windows >= min_windows:
+            break
+
+    if selected_windows < min_windows:
+        raise ValueError(
+            f"Could not reserve the requested minimum training windows. "
+            f"Requested MIN_TRAIN_WINDOW_NUM={min_windows}, "
+            f"but only {selected_windows} good-run windows are available."
+        )
+
+    return selected
+
+
+def select_run_groups_for_window_target(
+    run_groups: List[Dict],
+    target_windows: int,
+    random_seed: int,
+) -> List[Dict]:
+    """
+    Select whole runs until reaching target_windows.
+
+    The random choice happens at the run level, not at the file level.
+    Since selected runs are kept whole, the final window count may be above
+    target_windows if the last selected run crosses the target.
+    """
+    target_windows = int(target_windows)
+
+    if target_windows <= 0:
+        return []
+
+    selected = []
+    selected_windows = 0
+
+    for group in shuffle_run_groups(run_groups, random_seed):
+        selected.append(group)
+        selected_windows += group["n_windows"]
+
+        if selected_windows >= target_windows:
+            break
+
+    return selected
+
+
+def select_run_groups_up_to_max_windows(
+    run_groups: List[Dict],
+    max_windows: Optional[int],
+) -> List[Dict]:
+    """
+    Select whole runs up to an optional maximum window cap.
+
+    If max_windows is None, all run groups are returned. If max_windows is set,
+    runs are added in sorted order only when adding the full run would not
+    exceed the cap. This avoids slicing through a run.
+    """
+    if max_windows is None:
+        return sort_run_groups(run_groups)
+
+    max_windows = int(max_windows)
+
+    if max_windows <= 0:
+        raise ValueError(f"MAX_TRAIN_WINDOW_NUM must be positive or None, got {max_windows}")
+
+    selected = []
+    selected_windows = 0
+
+    for group in sort_run_groups(run_groups):
+        group_windows = group["n_windows"]
+
+        if selected_windows + group_windows > max_windows:
+            continue
+
+        selected.append(group)
+        selected_windows += group_windows
+
+    return selected
+
+
+def add_extra_run_groups_up_to_max_windows(
+    base_groups: List[Dict],
+    extra_groups: List[Dict],
+    max_windows: Optional[int],
+) -> List[Dict]:
+    """
+    Start with required whole-run groups, then optionally add more whole runs.
+
+    This is used when MIN_TRAIN_WINDOW_NUM is enabled. The base groups are the
+    required training runs. Extra good runs are added only if they do not make
+    the training set exceed MAX_TRAIN_WINDOW_NUM.
+    """
+    selected = sort_run_groups(base_groups)
+
+    if max_windows is None:
+        return sort_run_groups(selected + extra_groups)
+
+    max_windows = int(max_windows)
+
+    if max_windows <= 0:
+        raise ValueError(f"MAX_TRAIN_WINDOW_NUM must be positive or None, got {max_windows}")
+
+    selected_windows = sum(group["n_windows"] for group in selected)
+
+    if selected_windows > max_windows:
+        raise ValueError(
+            f"The required whole-run training selection has {selected_windows} windows, "
+            f"which is larger than MAX_TRAIN_WINDOW_NUM={max_windows}. "
+            f"The script will not slice through a run. Increase MAX_TRAIN_WINDOW_NUM, "
+            f"lower MIN_TRAIN_WINDOW_NUM, or set MAX_TRAIN_WINDOW_NUM=None."
+        )
+
+    selected_runs = {group["run"] for group in selected}
+
+    for group in sort_run_groups(extra_groups):
+        if group["run"] in selected_runs:
+            continue
+
+        group_windows = group["n_windows"]
+
+        if selected_windows + group_windows > max_windows:
+            continue
+
+        selected.append(group)
+        selected_runs.add(group["run"])
+        selected_windows += group_windows
+
+    return sort_run_groups(selected)
 
 def select_good_files_for_test(
     good_infos: List[Dict],
@@ -750,45 +961,55 @@ def main() -> None:
 
     total_default_good_windows = sum(info["n_windows"] for info in default_good_infos)
 
-    if MIN_TRAIN_WINDOW_NUM is None:
-        # Original behavior:
-        #   - all bad-run files go to test
-        #   - randomly select enough good-run files to approximately match
-        #     the total bad-window count
-        #   - everything else goes to train
-        selected_bad_infos = list(bad_infos)
+    good_run_groups = group_infos_by_run(good_infos)
+    bad_run_groups = group_infos_by_run(bad_infos)
 
-        selected_good_infos = select_good_files_for_test(
-            good_infos=good_infos,
+    if MIN_TRAIN_WINDOW_NUM is None:
+        # Original behavior, but now whole-run based:
+        #   - all bad runs go to test
+        #   - randomly select enough whole good runs to approximately match
+        #     the total bad-window count
+        #   - remaining good runs go to train
+        selected_bad_run_groups = list(bad_run_groups)
+
+        selected_good_run_groups = select_run_groups_for_window_target(
+            run_groups=good_run_groups,
             target_windows=total_bad_windows,
             random_seed=RANDOM_SEED,
         )
 
-        selected_good_paths = {info["path"] for info in selected_good_infos}
-        selected_bad_paths = {info["path"] for info in selected_bad_infos}
+        selected_good_runs = {group["run"] for group in selected_good_run_groups}
 
-        test_paths_set = selected_good_paths | selected_bad_paths
-
-        # Everything not selected for test goes to train.
-        train_infos = [
-            info
-            for info in all_infos
-            if info["path"] not in test_paths_set
+        train_candidate_run_groups = [
+            group
+            for group in good_run_groups
+            if group["run"] not in selected_good_runs
         ]
 
+        train_run_groups = select_run_groups_up_to_max_windows(
+            run_groups=train_candidate_run_groups,
+            max_windows=MAX_TRAIN_WINDOW_NUM,
+        )
+
+        selected_good_infos = flatten_run_groups(selected_good_run_groups)
+        selected_bad_infos = flatten_run_groups(selected_bad_run_groups)
+        train_infos = flatten_run_groups(train_run_groups)
         test_infos = selected_bad_infos + selected_good_infos
 
         remaining_good_windows_after_train_reserve = None
         test_target_windows_per_class = None
 
     else:
-        # New behavior:
-        #   1. Reserve good-run files for training until MIN_TRAIN_WINDOW_NUM
+        # New behavior, whole-run based:
+        #   1. Reserve whole good runs for training until MIN_TRAIN_WINDOW_NUM
         #      is reached.
-        #   2. Build the test set only from the remaining good-run files and
-        #      bad-run files.
+        #   2. Build the test set only from the remaining whole good runs and
+        #      whole bad runs.
         #   3. Use the lower of remaining-good windows and available-bad
         #      windows as the per-class test target.
+        #
+        # No run is split between train and test. If MAX_TRAIN_WINDOW_NUM is
+        # set, it is enforced by selecting whole runs only, not by slicing.
         if MAX_TRAIN_WINDOW_NUM is not None and MAX_TRAIN_WINDOW_NUM < MIN_TRAIN_WINDOW_NUM:
             raise ValueError(
                 f"MAX_TRAIN_WINDOW_NUM={MAX_TRAIN_WINDOW_NUM} is smaller than "
@@ -796,27 +1017,28 @@ def main() -> None:
                 f"This would cap the written training set below the requested minimum."
             )
 
-        reserved_train_good_infos = select_files_until_min_windows(
-            infos=good_infos,
+        reserved_train_good_run_groups = select_run_groups_until_min_windows(
+            run_groups=good_run_groups,
             min_windows=MIN_TRAIN_WINDOW_NUM,
+            random_seed=RANDOM_SEED,
         )
 
-        reserved_train_good_paths = {
-            info["path"]
-            for info in reserved_train_good_infos
+        reserved_train_good_runs = {
+            group["run"]
+            for group in reserved_train_good_run_groups
         }
 
-        remaining_good_infos = [
-            info
-            for info in good_infos
-            if info["path"] not in reserved_train_good_paths
+        remaining_good_run_groups = [
+            group
+            for group in good_run_groups
+            if group["run"] not in reserved_train_good_runs
         ]
 
         remaining_good_windows_after_train_reserve = sum(
-            info["n_windows"]
-            for info in remaining_good_infos
+            group["n_windows"]
+            for group in remaining_good_run_groups
         )
-        available_bad_windows = sum(info["n_windows"] for info in bad_infos)
+        available_bad_windows = sum(group["n_windows"] for group in bad_run_groups)
 
         test_target_windows_per_class = min(
             remaining_good_windows_after_train_reserve,
@@ -830,29 +1052,35 @@ def main() -> None:
                 "bad windows are available."
             )
 
-        selected_good_infos = select_files_for_window_target(
-            infos=remaining_good_infos,
-            target_windows=test_target_windows_per_class,
-            random_seed=RANDOM_SEED,
-        )
-
-        selected_bad_infos = select_files_for_window_target(
-            infos=bad_infos,
+        selected_good_run_groups = select_run_groups_for_window_target(
+            run_groups=remaining_good_run_groups,
             target_windows=test_target_windows_per_class,
             random_seed=RANDOM_SEED + 1,
         )
 
-        selected_good_paths = {info["path"] for info in selected_good_infos}
-        selected_bad_paths = {info["path"] for info in selected_bad_infos}
+        selected_bad_run_groups = select_run_groups_for_window_target(
+            run_groups=bad_run_groups,
+            target_windows=test_target_windows_per_class,
+            random_seed=RANDOM_SEED + 2,
+        )
 
-        # In the new mode, train contains only good-run files.
-        # Bad-run files not selected for test are intentionally unused.
-        train_infos = [
-            info
-            for info in good_infos
-            if info["path"] not in selected_good_paths
+        selected_good_runs = {group["run"] for group in selected_good_run_groups}
+
+        extra_train_good_run_groups = [
+            group
+            for group in remaining_good_run_groups
+            if group["run"] not in selected_good_runs
         ]
 
+        train_run_groups = add_extra_run_groups_up_to_max_windows(
+            base_groups=reserved_train_good_run_groups,
+            extra_groups=extra_train_good_run_groups,
+            max_windows=MAX_TRAIN_WINDOW_NUM,
+        )
+
+        selected_good_infos = flatten_run_groups(selected_good_run_groups)
+        selected_bad_infos = flatten_run_groups(selected_bad_run_groups)
+        train_infos = flatten_run_groups(train_run_groups)
         test_infos = selected_bad_infos + selected_good_infos
 
     # Sort so runs are never interleaved, and files inside each run are ordered.
@@ -960,8 +1188,11 @@ def main() -> None:
     print("Writing output files")
     print("=" * 80)
 
+    # Do not pass MAX_TRAIN_WINDOW_NUM into concatenate_npz_files here.
+    # The train/test selections above already enforce the training cap using
+    # whole runs. Passing max_windows here could slice through a run/file.
     concatenate_npz_files(test_paths, TEST_OUTPUT_PATH)
-    concatenate_npz_files(train_paths, TRAIN_OUTPUT_PATH, max_windows=MAX_TRAIN_WINDOW_NUM)
+    concatenate_npz_files(train_paths, TRAIN_OUTPUT_PATH)
 
     print("=" * 80)
     print("Done")
