@@ -1273,6 +1273,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--infer-only",
         "--infer_only",
+        "--inference-only",
+        "--inference_only",
         dest="infer_only",
         action="store_true",
         help=(
