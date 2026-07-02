@@ -7,9 +7,8 @@ import matplotlib.pyplot as plt
 # Input / output
 # ============================================================
 
-npz_path = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/checkpoints/gnn/0080_win100_stride100_hist10/inference_scores.npz"
-
-out_dir = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/inference_result_plots/0080_win100_stride100_hist10"
+npz_path = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/checkpoints/gnn/2_2_gnn_gru/inference_scores.npz"
+out_dir = "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/inference_result_plots/2_2_gnn_gru"
 os.makedirs(out_dir, exist_ok=True)
 
 # ============================================================
@@ -73,24 +72,51 @@ bad_runs = {
 
 # ============================================================
 # Optional run selection
-# If None or empty, plot all runs found in the NPZ.
-# If a list is given, only plot these runs.
-# Missing runs are skipped with a warning.
 # ============================================================
 
+# If True, ignore runs_to_plot and plot every run found in the NPZ,
+# including runs not listed in good_runs or bad_runs.
+plot_all_runs = True
+
+# If plot_all_runs=False, only these runs are plotted.
+# Missing runs are skipped with a warning.
 runs_to_plot = [
     18445,
     19627,
     19724,
     19946,
-    # 20104,
+    20104,
     20141,
     20142,
     20144,
 ]
 
+# Apply switch
+if plot_all_runs:
+    runs_to_plot = None
+
 # Use this instead if you want all runs:
 # runs_to_plot = None
+
+
+# ============================================================
+# Unknown-run handling
+# ============================================================
+
+# Controls how runs not listed in good_runs or bad_runs are displayed.
+#
+# Options:
+#   "unknown" : keep unknown runs labeled/colored as Unknown
+#   "good"    : treat unknown runs as Good for labels/colors
+#   "bad"     : treat unknown runs as Bad for labels/colors
+unknown_run_default = "good"
+
+allowed_unknown_run_defaults = {"unknown", "good", "bad"}
+if unknown_run_default not in allowed_unknown_run_defaults:
+    raise ValueError(
+        f"Bad unknown_run_default={unknown_run_default!r}. "
+        f"Use one of {sorted(allowed_unknown_run_defaults)}."
+    )
 
 
 # ============================================================
@@ -137,28 +163,61 @@ unknown_colors = [
 # Helpers
 # ============================================================
 
-def get_run_color(run, good_idx, bad_idx, unknown_idx):
+def get_effective_run_class(run):
+    """Return the display class for one run: 'good', 'bad', or 'unknown'."""
     if run in good_runs:
+        return "good"
+
+    if run in bad_runs:
+        return "bad"
+
+    return unknown_run_default
+
+
+def get_run_color(run, good_idx, bad_idx, unknown_idx):
+    run_class = get_effective_run_class(run)
+
+    if run_class == "good":
         color = good_colors[good_idx % len(good_colors)]
         good_idx += 1
         return color, good_idx, bad_idx, unknown_idx
-    elif run in bad_runs:
+
+    if run_class == "bad":
         color = bad_colors[bad_idx % len(bad_colors)]
         bad_idx += 1
         return color, good_idx, bad_idx, unknown_idx
-    else:
+
+    if run_class == "unknown":
         color = unknown_colors[unknown_idx % len(unknown_colors)]
         unknown_idx += 1
         return color, good_idx, bad_idx, unknown_idx
+
+    raise ValueError(
+        f"Bad effective run class {run_class!r} for run {run}. "
+        "Expected 'good', 'bad', or 'unknown'."
+    )
 
 
 def get_run_label(run):
     if run in good_runs:
         return f"Run {run} (Good)"
-    elif run in bad_runs:
+
+    if run in bad_runs:
         return f"Run {run} (Bad)"
-    else:
+
+    if unknown_run_default == "good":
+        return f"Run {run} (Good, defaulted from Unknown)"
+
+    if unknown_run_default == "bad":
+        return f"Run {run} (Bad, defaulted from Unknown)"
+
+    if unknown_run_default == "unknown":
         return f"Run {run} (Unknown)"
+
+    raise ValueError(
+        f"Bad unknown_run_default={unknown_run_default!r}. "
+        "Use 'unknown', 'good', or 'bad'."
+    )
 
 
 def resolve_runs_to_plot(all_runs, requested_runs):
@@ -579,6 +638,8 @@ if not (scores.shape == scores_max.shape == first_run.shape):
 available_runs = sorted(np.unique(first_run[np.isfinite(first_run)]).astype(int))
 print("\nAvailable runs in NPZ:")
 print(available_runs)
+print(f"\nplot_all_runs = {plot_all_runs}")
+print(f"unknown_run_default = {unknown_run_default!r}")
 
 # ============================================================
 # Histogram 1: scores
