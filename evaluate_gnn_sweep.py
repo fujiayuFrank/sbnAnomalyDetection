@@ -181,7 +181,7 @@ RESCALE_TRANSFORM_TO_UNIT_MAX = True
 # values and must be in [0, 1].
 # For NORMALIZATION_MODE = "none", thresholds are absolute raw score values.
 # The script evaluates every model at every threshold in this list.
-THRESHOLDS = [0.5]
+THRESHOLDS = [0.2, 0.4, 0.6, 0.8]
 
 # What to do with values exactly equal to the threshold.
 # False: value == threshold is predicted good.
@@ -204,8 +204,16 @@ bad_runs = {
     19627, 19946, 20104
 }
 
-# Unknown runs are ignored by default because they cannot enter the confusion matrix.
-IGNORE_UNKNOWN_RUNS = True
+# How to handle runs that are not in good_runs or bad_runs.
+#
+# Options:
+#   "ignore" -> unknown runs are excluded from evaluation
+#   "good"   -> unknown runs are treated as true good/normal
+#   "bad"    -> unknown runs are treated as true bad/anomalous
+#
+# For anomaly detection, "good" is often useful when bad_runs is a curated list
+# of known bad runs and everything else should be treated as normal.
+UNKNOWN_RUN_POLICY = "good"
 
 
 # ============================================================
@@ -373,14 +381,59 @@ def confusion_and_metrics(y_true_bad: np.ndarray, y_pred_bad: np.ndarray) -> Dic
     }
 
 
-def build_true_labels(first_run: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return y_true_bad and known-label mask."""
+def build_true_labels(first_run: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """Return true labels, evaluation mask, and run-label debug masks.
+
+    Label convention:
+      - y_true_bad=True means true bad/anomalous
+      - y_true_bad=False means true good/normal
+
+    UNKNOWN_RUN_POLICY controls runs not listed in good_runs or bad_runs:
+      - "ignore": exclude unknown runs from evaluation
+      - "good":   treat unknown runs as true good
+      - "bad":    treat unknown runs as true bad
+    """
     runs = np.asarray(first_run).astype(int)
-    is_good = np.isin(runs, list(good_runs))
-    is_bad = np.isin(runs, list(bad_runs))
-    known = is_good | is_bad
-    y_true_bad = is_bad
-    return y_true_bad, known
+
+    is_explicit_good = np.isin(runs, list(good_runs))
+    is_explicit_bad = np.isin(runs, list(bad_runs))
+    is_unknown = ~(is_explicit_good | is_explicit_bad)
+
+    policy = UNKNOWN_RUN_POLICY.lower()
+
+    if policy == "ignore":
+        eval_mask = is_explicit_good | is_explicit_bad
+        y_true_bad = is_explicit_bad
+        is_default_good = np.zeros_like(runs, dtype=bool)
+        is_default_bad = np.zeros_like(runs, dtype=bool)
+
+    elif policy == "good":
+        eval_mask = np.ones_like(runs, dtype=bool)
+        y_true_bad = is_explicit_bad
+        is_default_good = is_unknown
+        is_default_bad = np.zeros_like(runs, dtype=bool)
+
+    elif policy == "bad":
+        eval_mask = np.ones_like(runs, dtype=bool)
+        y_true_bad = is_explicit_bad | is_unknown
+        is_default_good = np.zeros_like(runs, dtype=bool)
+        is_default_bad = is_unknown
+
+    else:
+        raise ValueError(
+            "UNKNOWN_RUN_POLICY must be one of: 'ignore', 'good', 'bad'; "
+            f"got {UNKNOWN_RUN_POLICY!r}"
+        )
+
+    label_info = {
+        "is_explicit_good": is_explicit_good,
+        "is_explicit_bad": is_explicit_bad,
+        "is_unknown": is_unknown,
+        "is_default_good": is_default_good,
+        "is_default_bad": is_default_bad,
+    }
+
+    return y_true_bad, eval_mask, label_info
 
 
 def combine_predictions(
@@ -922,15 +975,42 @@ def prepare_model_arrays(
     scores_max = scores_max[finite_mask]
     first_run = first_run[finite_mask]
 
-    y_true_bad, known_mask = build_true_labels(first_run)
-    if IGNORE_UNKNOWN_RUNS:
-        eval_mask = known_mask
-    else:
-        eval_mask = np.ones_like(known_mask, dtype=bool)
+    y_true_bad, eval_mask, label_info = build_true_labels(first_run)
 
     if not np.any(eval_mask):
-        print(f"WARNING: {model_name}: no known good/bad runs found; skipping metrics.")
+        print(
+            f"WARNING: {model_name}: no windows selected for evaluation "
+            f"with UNKNOWN_RUN_POLICY={UNKNOWN_RUN_POLICY!r}; skipping metrics."
+        )
         return None
+
+    n_explicit_good = int(np.sum(label_info["is_explicit_good"] & eval_mask))
+    n_explicit_bad = int(np.sum(label_info["is_explicit_bad"] & eval_mask))
+    n_unknown_total = int(np.sum(label_info["is_unknown"]))
+    n_default_good = int(np.sum(label_info["is_default_good"] & eval_mask))
+    n_default_bad = int(np.sum(label_info["is_default_bad"] & eval_mask))
+    n_true_good = int(np.sum((~y_true_bad) & eval_mask))
+    n_true_bad = int(np.sum(y_true_bad & eval_mask))
+
+    print(
+        f"{model_name}: label policy={UNKNOWN_RUN_POLICY!r}; "
+        f"explicit_good={n_explicit_good}, explicit_bad={n_explicit_bad}, "
+        f"unknown_total={n_unknown_total}, default_good={n_default_good}, "
+        f"default_bad={n_default_bad}, true_good_eval={n_true_good}, "
+        f"true_bad_eval={n_true_bad}"
+    )
+
+    if n_true_good == 0:
+        print(
+            f"WARNING: {model_name}: no true-good windows were evaluated. "
+            "TN and FP will both be 0, so accuracy/F1 may be misleading."
+        )
+
+    if n_true_bad == 0:
+        print(
+            f"WARNING: {model_name}: no true-bad windows were evaluated. "
+            "TP and FN will both be 0, so metrics may be misleading."
+        )
 
     if NORMALIZATION_SCOPE == "per_model":
         score_scale = choose_scale(
@@ -975,6 +1055,7 @@ def prepare_model_arrays(
         "first_run": first_run,
         "y_true_bad": y_true_bad,
         "eval_mask": eval_mask,
+        "label_info": label_info,
         "norm_scores": norm_scores,
         "norm_scores_max": norm_scores_max,
         "score_scale": score_scale,
@@ -998,6 +1079,7 @@ def append_metrics_for_model_threshold(
     first_run = prepared["first_run"]
     y_true_bad = prepared["y_true_bad"]
     eval_mask = prepared["eval_mask"]
+    label_info = prepared["label_info"]
     norm_scores = prepared["norm_scores"]
     norm_scores_max = prepared["norm_scores_max"]
 
@@ -1019,6 +1101,7 @@ def append_metrics_for_model_threshold(
             "normalization_mode": NORMALIZATION_MODE,
             "normalization_scope": NORMALIZATION_SCOPE,
             "normalization_scale_mode": NORMALIZATION_SCALE_MODE,
+            "unknown_run_policy": UNKNOWN_RUN_POLICY,
             "threshold_units": threshold_unit_label(),
             "score_scale": prepared["score_scale"],
             "score_max_scale": prepared["score_max_scale"],
@@ -1026,6 +1109,11 @@ def append_metrics_for_model_threshold(
             "score_max_reference_max": prepared["score_max_ref_max"],
             "n_windows_total": int(scores.size),
             "n_windows_evaluated": int(np.sum(eval_mask)),
+            "n_explicit_good_windows": int(np.sum(label_info["is_explicit_good"] & eval_mask)),
+            "n_explicit_bad_windows": int(np.sum(label_info["is_explicit_bad"] & eval_mask)),
+            "n_unknown_windows_total": int(np.sum(label_info["is_unknown"])),
+            "n_default_good_windows": int(np.sum(label_info["is_default_good"] & eval_mask)),
+            "n_default_bad_windows": int(np.sum(label_info["is_default_bad"] & eval_mask)),
             "n_true_good_windows": int(np.sum((~y_true_bad) & eval_mask)),
             "n_true_bad_windows": int(np.sum(y_true_bad & eval_mask)),
             **metrics,
@@ -1035,7 +1123,16 @@ def append_metrics_for_model_threshold(
     # Per-run ratios for debugging and sanity checks.
     for run in sorted(np.unique(first_run[eval_mask])):
         run_mask = eval_mask & (first_run == run)
-        true_label = "bad" if run in bad_runs else "good" if run in good_runs else "unknown"
+        if run in bad_runs:
+            true_label = "bad"
+        elif run in good_runs:
+            true_label = "good"
+        elif UNKNOWN_RUN_POLICY.lower() == "good":
+            true_label = "default_good"
+        elif UNKNOWN_RUN_POLICY.lower() == "bad":
+            true_label = "default_bad"
+        else:
+            true_label = "unknown"
         if not np.any(run_mask):
             continue
 
@@ -1095,6 +1192,7 @@ def main() -> int:
     print(f"NORMALIZATION_MODE        = {NORMALIZATION_MODE}")
     print(f"NORMALIZATION_SCOPE       = {NORMALIZATION_SCOPE}")
     print(f"NORMALIZATION_SCALE_MODE  = {NORMALIZATION_SCALE_MODE}")
+    print(f"UNKNOWN_RUN_POLICY        = {UNKNOWN_RUN_POLICY}")
     print(f"THRESHOLDS                = {thresholds}")
     print(f"THRESHOLD_UNITS           = {threshold_unit_label()}")
     if args.scores_only:
@@ -1234,9 +1332,12 @@ def main() -> int:
     full_summary_fields = [
         "model_name", "batch_size", "learning_rate", "method", "threshold",
         "normalization_mode", "normalization_scope", "normalization_scale_mode",
-        "threshold_units",
+        "unknown_run_policy", "threshold_units",
         "score_scale", "score_max_scale", "score_reference_max", "score_max_reference_max",
-        "n_windows_total", "n_windows_evaluated", "n_true_good_windows", "n_true_bad_windows",
+        "n_windows_total", "n_windows_evaluated",
+        "n_explicit_good_windows", "n_explicit_bad_windows",
+        "n_unknown_windows_total", "n_default_good_windows", "n_default_bad_windows",
+        "n_true_good_windows", "n_true_bad_windows",
         "TP", "TN", "FP", "FN",
         "precision", "recall", "F1", "accuracy",
         "true_bad_pred_bad_ratio", "true_bad_pred_good_ratio",
