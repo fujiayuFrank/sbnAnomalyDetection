@@ -541,7 +541,7 @@ void plot_integral(int channel_min = 0, int channel_max = 500) {
     // Canvas and pads
     // --------------------------------------------------------
 
-    TCanvas* c = new TCanvas("c", "comparison", 1200, 900);
+    TCanvas* c = new TCanvas("c", "comparison", 1200, 800);
 
     TPad* pad1 = new TPad("pad1", "top", 0.0, 0.32, 1.0, 1.0);
     TPad* pad2 = new TPad("pad2", "bottom", 0.0, 0.0, 1.0, 0.32);
