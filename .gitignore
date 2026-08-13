@@ -84,4 +84,6 @@ dataset_preparation/filtered_full_low_evt/
 dataset_preparation/bad_events_test.npz
 dataset_preparation/good_events_test.npz
 dataset_preparation/events_train.npz
+dataset_preparation/original_npz_data_files
+
 nohup.out

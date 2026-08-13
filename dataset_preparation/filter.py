@@ -52,15 +52,15 @@ import numpy as np
 # ============================================================
 
 DEFAULT_TRAIN_NPZ_PATH = Path(
-    "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/scratch/events_train.npz"
+    "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/dataset_preparation/original_npz_data_files/events_train.npz"
 )
 
 DEFAULT_GOOD_NPZ_PATH = Path(
-    "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/scratch/good_events_test.npz"
+    "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/dataset_preparation/original_npz_data_files/good_events_test.npz"
 )
 
 DEFAULT_BAD_NPZ_PATH = Path(
-    "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/scratch/bad_events_test.npz"
+    "/exp/sbnd/app/users/jiayufu/sbnAnomalyDetection/dataset_preparation/original_npz_data_files/bad_events_test.npz"
 )
 
 # Keep channels where:
